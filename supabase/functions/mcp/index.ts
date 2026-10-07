@@ -23,7 +23,8 @@ const authClient = createClient(supabaseUrl, serviceKey, { auth: { persistSessio
 const handler = createHandler({
   store: supabaseStore(supabaseUrl, serviceKey),
   alpaca: new Alpaca({ keyId: Deno.env.get("ALPACA_KEY_ID") ?? "", secretKey: Deno.env.get("ALPACA_SECRET_KEY") ?? "" }),
-  cfg: parseConfig({
+  siteOrigins: ["https://portfolio.oliverseydlitz.com"],
+  defaultCfg: parseConfig({
     MAX_ORDER_PCT: Deno.env.get("MAX_ORDER_PCT") ?? "10",
     MAX_POSITION_PCT: Deno.env.get("MAX_POSITION_PCT") ?? "20",
     MAX_ORDERS_PER_DAY: Deno.env.get("MAX_ORDERS_PER_DAY") ?? "10",

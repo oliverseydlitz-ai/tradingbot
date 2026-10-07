@@ -141,3 +141,27 @@ export function checkOrder(req: OrderRequest, ctx: GuardContext, cfg: GuardConfi
 
   return { ok: true, notional };
 }
+
+export type SettingsResult = { ok: true; cfg: GuardConfig } | { ok: false; error: string };
+
+/** Validates limits submitted from the dashboard. Hard ceilings stop fat-finger mistakes. */
+export function validateSettings(input: unknown): SettingsResult {
+  const o = (input ?? {}) as Record<string, unknown>;
+  const pct = (v: unknown, name: string): number | string => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 && n <= 100 ? n : `${name} must be greater than 0 and at most 100.`;
+  };
+  const maxOrderPct = pct(o.maxOrderPct, "Max order %");
+  if (typeof maxOrderPct === "string") return { ok: false, error: maxOrderPct };
+  const maxPositionPct = pct(o.maxPositionPct, "Max position %");
+  if (typeof maxPositionPct === "string") return { ok: false, error: maxPositionPct };
+  const maxOrdersPerDay = Number(o.maxOrdersPerDay);
+  if (!Number.isInteger(maxOrdersPerDay) || maxOrdersPerDay < 1 || maxOrdersPerDay > 100) {
+    return { ok: false, error: "Max orders per day must be a whole number from 1 to 100." };
+  }
+  const raw = Array.isArray(o.allowlist) ? o.allowlist : String(o.allowlist ?? "").split(",");
+  const allowlist = raw.map((x) => String(x).trim().toUpperCase()).filter(Boolean);
+  const bad = allowlist.find((x) => !/^[A-Z]{1,5}(\.[A-Z])?$/.test(x));
+  if (bad) return { ok: false, error: `"${bad}" is not a valid ticker.` };
+  return { ok: true, cfg: { maxOrderPct, maxPositionPct, maxOrdersPerDay, allowlist } };
+}

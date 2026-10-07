@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import type { GuardConfig } from "./guardrails.ts";
 import type { Store, TradeRow } from "./store.ts";
 
 const fail = (op: string, error: { message: string } | null) => {
@@ -13,6 +14,7 @@ export function supabaseStore(url: string, serviceKey: string): Store {
         .from("trades")
         .select("id", { count: "exact", head: true })
         .eq("trade_date", date)
+        .eq("source", "mcp")
         .in("status", ["pending", "accepted", "canceled"]);
       fail("count", error);
       return count ?? 0;
@@ -29,6 +31,7 @@ export function supabaseStore(url: string, serviceKey: string): Store {
           order_type: t.orderType,
           limit_price: t.limitPrice,
           status: t.status,
+          source: t.source,
           reason: t.reason,
           equity_at_time: t.equity,
           error: t.error ?? null,
@@ -65,6 +68,28 @@ export function supabaseStore(url: string, serviceKey: string): Store {
       const { data, error } = await q;
       fail("list", error);
       return data ?? [];
+    },
+    async getSettings() {
+      const { data, error } = await db.from("settings").select("*").eq("id", 1).maybeSingle();
+      fail("settings", error);
+      if (!data) return null;
+      return {
+        maxOrderPct: data.max_order_pct,
+        maxPositionPct: data.max_position_pct,
+        maxOrdersPerDay: data.max_orders_per_day,
+        allowlist: String(data.symbol_allowlist ?? "").split(",").map((x: string) => x.trim().toUpperCase()).filter(Boolean),
+      } satisfies GuardConfig;
+    },
+    async saveSettings(cfg) {
+      const { error } = await db.from("settings").upsert({
+        id: 1,
+        max_order_pct: cfg.maxOrderPct,
+        max_position_pct: cfg.maxPositionPct,
+        max_orders_per_day: cfg.maxOrdersPerDay,
+        symbol_allowlist: cfg.allowlist.join(","),
+        updated_at: new Date().toISOString(),
+      });
+      fail("save settings", error);
     },
   };
 }
