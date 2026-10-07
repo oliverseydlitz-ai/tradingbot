@@ -31,6 +31,19 @@ function untilText(iso) {
   const m = Math.max(0, Math.round((new Date(iso).getTime() - Date.now()) / 60000));
   return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
 }
+const money = (n) => {
+  const [w, c] = usd(n).split(".");
+  const neg = w.startsWith(MINUS);
+  return `${neg ? MINUS : ""}<span class="cur">$</span>${w.replace(/^\u2212?\$/, "")}<span class="cents">.${c}</span>`;
+};
+const localDay = (d) => new Date(d).toLocaleDateString("en-CA");
+function dayLabel(iso) {
+  const day = localDay(iso), today = localDay(Date.now()), yest = localDay(Date.now() - 864e5);
+  if (day === today) return "Today";
+  if (day === yest) return "Yesterday";
+  return new Date(iso).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+}
+const clock = (d) => new Date(d).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 const opensText = (iso) =>
   new Date(iso).toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" });
 
@@ -63,6 +76,8 @@ const I = {
   buy: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 12.5v-9M4 7.5l4-4 4 4"/></svg>`,
   sell: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3.5v9M4 8.5l4 4 4-4"/></svg>`,
   note: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l1-3.5L10.5 3a1.4 1.4 0 0 1 2 2L6 11.5z"/><path d="M9.5 4l2 2"/></svg>`,
+  check: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>`,
+  warn: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 4.5v4.5M8 11.6v.1"/></svg>`,
   block: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M4.2 11.8l7.6-7.6"/></svg>`,
   github: `<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>`,
 };
@@ -82,6 +97,9 @@ const S = {
   firstPaint: true,
   scrubbing: false,
   sheet: null,
+  updatedAt: null,
+  prev: null,        // last rendered values, for the tick flash on refresh
+  prevPeriod: null,  // for the sliding period indicator
 };
 const T = { symbol: "", side: "buy", size: "notional", type: "market", amount: "", limit: "", note: "", quote: null, review: false, busy: false, error: null };
 
@@ -130,9 +148,9 @@ function mountShell() {
 }
 
 let toastTimer;
-function toast(msg) {
+function toast(msg, kind = "ok") {
   const t = document.getElementById("toast");
-  t.textContent = msg;
+  t.innerHTML = `<span class="toast-i ${kind}">${kind === "ok" ? I.check : I.warn}</span><span>${esc(msg)}</span>`;
   t.classList.add("on");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove("on"), 3200);
@@ -141,26 +159,30 @@ function toast(msg) {
 /* ---------- main view ---------- */
 function marketBits(m) {
   return m.is_open
-    ? { cls: "open", chip: "Open", line: `Market closes in ${untilText(m.next_close)}` }
-    : { cls: "", chip: "Closed", line: `Market opens ${opensText(m.next_open)}` };
+    ? { cls: "open", chip: "Open", cd: untilText(m.next_close), line: `Market closes in ${untilText(m.next_close)}` }
+    : { cls: "", chip: "Closed", cd: opensText(m.next_open), line: `Market opens ${opensText(m.next_open)}` };
 }
 
 function heroHtml(d) {
   const a = d.account;
-  const [whole, cents] = usd(a.equity).split(".");
   const mk = marketBits(d.market);
+  const all = S.history.all ?? [];
+  const since = all.length >= 2 ? (() => {
+    const diff = a.equity - all[0].equity, p = (a.equity / all[0].equity - 1) * 100;
+    return `<span>All-time <b class="${tone(diff)}">${sign(diff)}${usd(Math.abs(diff))} (${pct(p)})</b></span>`;
+  })() : "";
   return `<section class="hero">
     <div class="eyebrow">Paper equity</div>
-    <div class="equity num" id="equity" data-v="${a.equity}">${whole}<span class="cents">.${cents}</span></div>
+    <div class="equity num" id="equity" data-v="${a.equity}" data-tick="equity">${money(a.equity)}</div>
     <div class="delta">${deltaChip(a.day_pl, `${sign(a.day_pl)}${usd(Math.abs(a.day_pl))}`)}<span class="${tone(a.day_pl) === "flat" ? "mute" : tone(a.day_pl)}">${pct(a.day_pl_pct)}</span><span class="mute">today</span></div>
-    <div class="hint" style="margin-top:12px">${esc(mk.line)}</div>
+    <div class="meta">${since}<span>${esc(mk.line)}</span></div>
   </section>`;
 }
 
 function tapeHtml(d) {
   if (!d.positions.length) return "";
   const items = [...d.positions].sort((a, b) => a.symbol.localeCompare(b.symbol))
-    .map((p) => `<span class="tape-item"><b>${esc(p.symbol)}</b><span class="num">${usd(p.current_price)}</span><span class="${tone(p.day_pl_pct)} num">${pct(p.day_pl_pct)}</span></span>`).join("");
+    .map((p) => `<span class="tape-item"><b>${esc(p.symbol)}</b><span class="num">${usd(p.current_price)}</span><span class="${tone(p.day_pl_pct)} num tape-d">${p.day_pl_pct > 0.00001 ? I.up : p.day_pl_pct < -0.00001 ? I.down : ""}${Math.abs(p.day_pl_pct).toFixed(2)}%</span></span>`).join("");
   const dur = Math.max(18, d.positions.length * 5);
   return `<div class="tape" aria-hidden="true"><div class="tape-track" style="animation-duration:${dur}s">${items}${items}</div></div>`;
 }
@@ -178,6 +200,7 @@ function scoreHtml() {
   const bar = lead >= 0
     ? `<b style="left:${50 - half}%;width:${half}%;background:var(--accent)"></b>`
     : `<b style="left:50%;width:${half}%;background:var(--spy)"></b>`;
+  const ahead = p.slice(1).filter((q) => q.portfolio > q.spy).length;
   const verdict = Math.abs(lead) < 0.005 ? "<strong>Dead even.</strong>"
     : lead > 0 ? `<strong>Claude leads</strong> by ${pts(lead).slice(1)}` : `<strong>SPY leads</strong> by ${pts(-lead).slice(1)}`;
   return `<section class="card score"><div class="card-h"><h2>The race</h2><span class="aside">since ${esc(fmtDay(p[0].date))} · ${p.length - 1} trading day${p.length === 2 ? "" : "s"}</span></div>
@@ -187,7 +210,7 @@ function scoreHtml() {
       <div class="side spy"><div class="who"><i></i>SPY</div><div class="ret num ${tone(s)}">${pct(s)}</div></div>
     </div>
     <div class="race" role="img" aria-label="Lead ${esc(pts(lead))}">${bar}</div>
-    <div class="verdict"><span>${verdict}</span></div>
+    <div class="verdict"><span>${verdict}</span><span class="mono-s">Ahead ${ahead}/${p.length - 1} days</span></div>
   </section>`;
 }
 
@@ -205,7 +228,7 @@ function chartCardHtml() {
       <span class="when" id="ro-w"></span>
     </div>
     ${body}
-    <div class="tabs" role="group" aria-label="Period">${periods.map(([k, l]) => `<button data-period="${k}" aria-pressed="${k === S.period}">${l}</button>`).join("")}</div>
+    <div class="tabs" role="group" aria-label="Period"><span class="tab-ind" aria-hidden="true"></span>${periods.map(([k, l]) => `<button data-period="${k}" aria-pressed="${k === S.period}">${l}</button>`).join("")}</div>
   </section>`;
 }
 
@@ -235,15 +258,21 @@ function performanceHtml(d) {
   </section>`;
 }
 
+const CAT_COLOR = { Stock: "var(--cat-1)", ETF: "var(--cat-2)", "Bond ETF": "var(--cat-3)" };
 function holdingsHtml(d) {
   const rows = [...d.positions].sort((a, b) => b.market_value - a.market_value);
   const maxW = Math.max(1, ...rows.map((r) => r.weight_pct));
   return `<section class="card"><div class="card-h"><h2>Holdings</h2><span class="aside">tap to trade</span></div>
     ${rows.length ? `<div class="holdings">${rows.map((p) => `<button class="h-row" data-sym="${esc(p.symbol)}" aria-label="Trade ${esc(p.symbol)}">
-      <span class="h-sym"><b>${esc(p.symbol)}</b><span>${esc(p.name)}</span></span>
-      <span class="h-val">${usd(p.market_value)}</span>
-      <span class="h-sub"><span class="w"><i style="width:${(p.weight_pct / maxW) * 100}%"></i></span>${p.weight_pct.toFixed(1)}% · ${shares(p.qty)} sh</span>
-      <span class="h-pl"><span class="${tone(p.unrealized_pl)}">${sign(p.unrealized_pl)}${usd(Math.abs(p.unrealized_pl))} (${pct(p.unrealized_pl_pct)})</span></span>
+      <span class="tile" style="--c:${CAT_COLOR[p.category] ?? "var(--cat-1)"}" title="${esc(p.category)}">${esc(p.symbol.slice(0, 1))}</span>
+      <span class="h-main">
+        <span class="h-sym"><b>${esc(p.symbol)}</b><span>${esc(p.name)}</span></span>
+        <span class="h-sub"><span class="w"><i style="width:${(p.weight_pct / maxW) * 100}%"></i></span>${p.weight_pct.toFixed(1)}%<span class="sh"> · ${shares(p.qty)} sh</span> · <span class="${tone(p.day_pl_pct)}">${pct(p.day_pl_pct)} today</span></span>
+      </span>
+      <span class="h-right">
+        <span class="h-val" data-tick="pos:${esc(p.symbol)}" data-v="${p.market_value}">${usd(p.market_value)}</span>
+        <span class="h-pl ${tone(p.unrealized_pl)}">${sign(p.unrealized_pl)}${usd(Math.abs(p.unrealized_pl))} · ${pct(p.unrealized_pl_pct)}</span>
+      </span>
     </button>`).join("")}</div>` : `<p class="empty">No positions yet. Claude's first run, or a tap on Trade, fills this in.</p>`}
   </section>`;
 }
@@ -267,7 +296,7 @@ function tradeEvent(t) {
   const long = (t.reason ?? "").length > 220;
   return `<article class="ev">
     <span class="ev-dot ${blocked ? "" : t.side}">${blocked ? I.block : I[t.side] ?? I.buy}</span>
-    <div><div class="ev-top"><span class="ev-title">${esc(titles[t.status] ?? t.status)} <span class="mono">${esc(t.symbol)}</span> <span class="mute num">${amt}</span></span><time class="ev-time" datetime="${esc(t.created_at)}">${esc(relTime(t.created_at))}</time></div>
+    <div><div class="ev-top"><span class="ev-title">${esc(titles[t.status] ?? t.status)} <span class="mono">${esc(t.symbol)}</span> <span class="mute num">${amt}</span></span><time class="ev-time" datetime="${esc(t.created_at)}" title="${esc(relTime(t.created_at))}">${esc(clock(t.created_at))}</time></div>
       <div class="ev-tags">${t.source === "manual" ? `<span class="tag">You</span>` : `<span class="tag ai">Claude</span>`}${blocked ? `<span class="tag warn">${esc(explain(t.error).title ?? (t.status === "rejected" ? "Guardrail" : "Error"))}</span>` : ""}</div>
       ${t.reason ? `<div class="ev-body${long ? " clamp" : ""}">${esc(t.reason)}</div>${long ? `<button class="more">Read more</button>` : ""}` : ""}
       ${t.error ? `<div class="ev-err">${esc(explain(t.error).detail)}</div>` : ""}
@@ -278,7 +307,7 @@ function noteEvent(n) {
   const long = n.body.length > 260 || n.body.split("\n").length > 4;
   return `<article class="ev">
     <span class="ev-dot note">${I.note}</span>
-    <div><div class="ev-top"><span class="ev-title">${esc(n.title || "Note")}</span><time class="ev-time" datetime="${esc(n.created_at)}">${esc(relTime(n.created_at))}</time></div>
+    <div><div class="ev-top"><span class="ev-title">${esc(n.title || "Note")}</span><time class="ev-time" datetime="${esc(n.created_at)}" title="${esc(relTime(n.created_at))}">${esc(clock(n.created_at))}</time></div>
       ${(n.tags ?? []).length ? `<div class="ev-tags">${n.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>` : ""}
       <div class="ev-body${long ? " clamp" : ""}">${esc(n.body)}</div>${long ? `<button class="more">Read more</button>` : ""}
     </div></article>`;
@@ -286,9 +315,20 @@ function noteEvent(n) {
 
 function feedHtml() {
   const tab = S.feed ?? (S.notes.length ? "journal" : "trades");
+  const grouped = (items, render) => {
+    const out = [];
+    let last = null;
+    for (const it of items) {
+      const label = dayLabel(it.created_at);
+      if (label !== last) { if (last !== null) out.push("</div>"); out.push(`<div class="day"><div class="day-h">${esc(label)}</div>`); last = label; }
+      out.push(render(it));
+    }
+    if (last !== null) out.push("</div>");
+    return out.join("");
+  };
   const list = tab === "journal"
-    ? (S.notes.length ? S.notes.map(noteEvent).join("") : `<p class="empty">Claude hasn't written a note yet. Each scheduled run ends with one.</p>`)
-    : (S.trades.length ? S.trades.map(tradeEvent).join("") : `<p class="empty">No trades yet.</p>`);
+    ? (S.notes.length ? grouped(S.notes, noteEvent) : `<p class="empty">Claude hasn't written a note yet. Each scheduled run ends with one.</p>`)
+    : (S.trades.length ? grouped(S.trades, tradeEvent) : `<p class="empty">No trades yet.</p>`);
   return `<section class="card"><div class="card-h" style="align-items:center"><h2>${tab === "journal" ? "Claude's journal" : "Trade log"}</h2>
       <div class="seg" role="group" aria-label="Feed"><button data-feed="journal" aria-pressed="${tab === "journal"}">Journal</button><button data-feed="trades" aria-pressed="${tab === "trades"}">Trades</button></div></div>
     <div class="feed">${list}</div></section>`;
@@ -302,7 +342,7 @@ function renderMain() {
     <header class="bar">
       <div class="mark">${I.mark}<span>Portfolio</span></div>
       <div class="bar-right">
-        <span class="status ${mk.cls}" title="${esc(mk.line)}"><i></i>${mk.chip}</span>
+        <span class="status ${mk.cls}" title="${esc(mk.line)}"><i></i>${mk.chip}<span class="cd">${esc(mk.cd)}</span></span>
         <button class="icon-btn" id="refresh" aria-label="Refresh">${I.refresh}</button>
         <button class="icon-btn" id="limits" aria-label="Limits and account">${I.sliders}</button>
         <button class="bar-trade" id="bar-trade">${I.plus}<span>Trade</span></button>
@@ -314,11 +354,26 @@ function renderMain() {
       <div class="col">${chartCardHtml()}${holdingsHtml(d)}${openOrdersHtml(d)}</div>
       <div class="col">${allocationHtml(d)}${performanceHtml(d)}${feedHtml()}</div>
     </div>
-    <footer class="foot"><span>Alpaca paper account · IEX data</span><span>Signed in as ${esc(S.login)}</span></footer>`;
+    <footer class="foot"><span>Alpaca paper account · IEX data · updated ${esc(clock(S.updatedAt ?? Date.now()))}${d.market.is_open ? " · live" : ""}</span><span>Signed in as ${esc(S.login)}</span></footer>`;
   if (!S.firstPaint) main.classList.add("settled");
   mountChart();
   if (S.firstPaint) countUp();
+  flashTicks(main);
+  document.title = `${usd(d.account.equity, 0)} ${d.account.day_pl_pct >= 0 ? "▲" : "▼"} ${Math.abs(d.account.day_pl_pct).toFixed(2)}% · Portfolio`;
   S.firstPaint = false;
+}
+
+// Values that moved since the last refresh flash once in the direction they moved.
+function flashTicks(main) {
+  const now = {};
+  main.querySelectorAll("[data-tick]").forEach((el) => {
+    const k = el.dataset.tick, v = Number(el.dataset.v);
+    now[k] = v;
+    const before = S.prev?.[k];
+    if (before == null || Math.abs(v - before) < 0.005 || reducedMotion) return;
+    el.classList.add(v > before ? "tick-up" : "tick-down");
+  });
+  S.prev = now;
 }
 
 function countUp() {
@@ -327,8 +382,7 @@ function countUp() {
   const target = Number(el.dataset.v), from = target * 0.985, t0 = performance.now(), dur = 900;
   const step = (now) => {
     const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
-    const [w, c] = usd(from + (target - from) * e).split(".");
-    el.innerHTML = `${w}<span class="cents">.${c}</span>`;
+    el.innerHTML = money(from + (target - from) * e);
     if (k < 1) requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
@@ -368,24 +422,37 @@ function mountChart() {
   const ticks = [];
   for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) ticks.push(+v.toFixed(6));
   const xl = [0, Math.floor((n - 1) / 2), n - 1].filter((v, i, a) => a.indexOf(v) === i);
+  // Price-tag labels at the right edge for both series' latest value, nudged apart if they collide.
+  const endP = points.at(-1).portfolio - 100, endS = points.at(-1).spy - 100;
+  let tp = y(endP), ts = y(endS);
+  if (Math.abs(tp - ts) < 19) { const mid = (tp + ts) / 2, dir = tp <= ts ? -1 : 1; tp = mid + dir * 9.5; ts = mid - dir * 9.5; }
+  const tag = (ty, text, fill, ink, stroke) =>
+    `<g class="fade" transform="translate(${W - padR + 6} ${ty - 9})"><rect width="${padR - 7}" height="18" rx="5" fill="${fill}" ${stroke ? `stroke="${stroke}"` : ""}/><text x="${(padR - 7) / 2}" y="12.5" text-anchor="middle" font-size="10" font-weight="500" font-family="var(--mono)" fill="${ink}">${esc(pct(text, Math.abs(text) >= 10 ? 1 : 2).replace("%", ""))}</text></g>`;
+  const nearTag = (yy) => Math.abs(yy - tp) < 13 || Math.abs(yy - ts) < 13;
   const gid = `g${Math.random().toString(36).slice(2, 7)}`;
 
   el.classList.toggle("anim", S.animateChart && !reducedMotion);
   el.innerHTML = `<svg width="${W}" height="${H}" role="img" aria-label="Claude ${esc(pct(points.at(-1).portfolio - 100))} versus SPY ${esc(pct(points.at(-1).spy - 100))} over the period">
     <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--accent)" stop-opacity=".26"/><stop offset="1" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>
-    ${ticks.map((v) => `<line x1="${padL}" x2="${W - padR + 6}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)" ${v === 0 ? "" : 'stroke-dasharray="2 4"'}/><text x="${W - 2}" y="${y(v) + 3.5}" text-anchor="end" font-size="10" font-family="var(--mono)" fill="var(--mute)">${v === 0 ? "0%" : pct(v, step < 0.1 ? 2 : step < 1 ? 1 : 0)}</text>`).join("")}
+    ${ticks.map((v) => `<line x1="${padL}" x2="${W - padR + 6}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)" ${v === 0 ? "" : 'stroke-dasharray="2 4"'}/>${nearTag(y(v)) ? "" : `<text x="${W - 2}" y="${y(v) + 3.5}" text-anchor="end" font-size="10" font-family="var(--mono)" fill="var(--mute)">${v === 0 ? "0%" : pct(v, step < 0.1 ? 2 : step < 1 ? 1 : 0)}</text>`}`).join("")}
     <path class="fade" d="${line("portfolio")}L${x(n - 1)} ${H - padB}L${x(0)} ${H - padB}Z" fill="url(#${gid})"/>
     <path class="fade" d="${line("spy")}" fill="none" stroke="var(--spy)" stroke-width="1.5" stroke-dasharray="4 4" stroke-linejoin="round" opacity=".85"/>
     <path class="draw" d="${line("portfolio")}" fill="none" stroke="var(--accent)" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
-    <circle class="fade" cx="${x(n - 1)}" cy="${y(points.at(-1).portfolio - 100)}" r="3.5" fill="var(--accent)"/>
+    <circle class="halo" cx="${x(n - 1)}" cy="${y(endP)}" r="3.5" fill="var(--accent)"/>
+    <circle class="fade" cx="${x(n - 1)}" cy="${y(endP)}" r="3.5" fill="var(--accent)"/>
+    ${tag(ts, endS, "var(--surface-2)", "var(--ink-2)", "var(--line-2)")}
+    ${tag(tp, endP, "var(--accent)", "var(--accent-ink)")}
     ${xl.map((i, k) => `<text x="${x(i)}" y="${H - 6}" font-size="10" font-family="var(--mono)" fill="var(--mute)" text-anchor="${k === 0 ? "start" : k === xl.length - 1 ? "end" : "middle"}">${esc(fmtDay(points[i].date))}</text>`).join("")}
-    <g id="xh" style="display:none"><line y1="${padT}" y2="${H - padB}" stroke="var(--ink-2)" stroke-width="1" opacity=".5"/><circle r="4.5" fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/><circle r="4" fill="var(--spy)" stroke="var(--surface)" stroke-width="2"/></g>
+    <g id="xh" style="display:none"><line y1="${padT}" y2="${H - padB}" stroke="var(--ink-2)" stroke-width="1" opacity=".5"/><circle r="4.5" fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/><circle r="4" fill="var(--spy)" stroke="var(--surface)" stroke-width="2"/>
+      <g class="xh-pill"><rect y="${H - padB + 5}" height="18" rx="5" fill="var(--ink)"/><text y="${H - padB + 17.5}" text-anchor="middle" font-size="10" font-weight="500" font-family="var(--mono)" fill="var(--bg)"></text></g></g>
   </svg>`;
   // The line-draw animation needs the path's real length.
   el.querySelectorAll("path.draw").forEach((p) => p.style.setProperty("--len", Math.ceil(p.getTotalLength())));
   S.animateChart = false;
+  slideTabs();
 
   const xh = el.querySelector("#xh"), [vl, c1, c2] = xh.children;
+  const pill = xh.querySelector(".xh-pill"), pr = pill.querySelector("rect"), pt = pill.querySelector("text");
   const scrub = (ev) => {
     const r = el.getBoundingClientRect();
     const i = Math.max(0, Math.min(n - 1, Math.round(((ev.clientX - r.left - padL) / (W - padL - padR)) * (n - 1))));
@@ -394,6 +461,8 @@ function mountChart() {
     vl.setAttribute("x1", cx); vl.setAttribute("x2", cx);
     c1.setAttribute("cx", cx); c1.setAttribute("cy", y(p.portfolio - 100));
     c2.setAttribute("cx", cx); c2.setAttribute("cy", y(p.spy - 100));
+    const label = fmtDay(p.date), pw = label.length * 6.4 + 14, px = Math.max(padL, Math.min(W - padR - pw, cx - pw / 2));
+    pt.textContent = label; pt.setAttribute("x", px + pw / 2); pr.setAttribute("x", px); pr.setAttribute("width", pw);
     setReadout(p, `${fmtDay(p.date)} · ${usd(p.equity, 0)}`);
     S.scrubbing = true;
   };
@@ -405,14 +474,60 @@ function mountChart() {
   el.onpointercancel = end;
 }
 
+function slideTabs() {
+  const tabs = document.querySelector(".tabs"), ind = tabs?.querySelector(".tab-ind");
+  if (!ind) return;
+  const place = (btn) => { ind.style.width = `${btn.offsetWidth}px`; ind.style.transform = `translateX(${btn.offsetLeft}px)`; };
+  const cur = tabs.querySelector(`[data-period="${S.period}"]`), prev = S.prevPeriod && tabs.querySelector(`[data-period="${S.prevPeriod}"]`);
+  ind.style.transition = "none";
+  place(prev || cur);
+  ind.getBoundingClientRect(); // commit the start position before animating
+  ind.style.transition = "";
+  place(cur);
+  S.prevPeriod = S.period;
+}
+
 /* ---------- sheets ---------- */
 let lastFocus = null;
 function openSheet(id) {
   lastFocus = document.activeElement;
   S.sheet = id;
+  const sheet = document.getElementById(id);
   document.getElementById("scrim").classList.add("on");
-  document.getElementById(id).classList.add("on");
+  sheet.style.transform = "";
+  sheet.classList.add("on");
   document.body.style.overflow = "hidden";
+  enableSwipe(sheet);
+}
+
+// Drag the handle or header down to dismiss, like a native sheet.
+function enableSwipe(sheet) {
+  const zone = [sheet.querySelector(".grab"), sheet.querySelector(".sheet-h")].filter(Boolean);
+  let startY = null, dy = 0, t0 = 0;
+  const move = (e) => {
+    if (startY == null) return;
+    dy = Math.max(0, e.clientY - startY);
+    sheet.style.transform = `translateY(${dy}px)`;
+  };
+  const up = () => {
+    if (startY == null) return;
+    const fast = dy / Math.max(1, performance.now() - t0) > 0.6;
+    sheet.classList.remove("dragging");
+    sheet.style.transform = "";
+    if (dy > 110 || (fast && dy > 30)) closeSheet();
+    startY = null; dy = 0;
+    removeEventListener("pointermove", move);
+    removeEventListener("pointerup", up);
+    removeEventListener("pointercancel", up);
+  };
+  zone.forEach((z) => (z.onpointerdown = (e) => {
+    if (e.target.closest("button") || e.pointerType === "mouse") return;
+    startY = e.clientY; t0 = performance.now(); dy = 0;
+    sheet.classList.add("dragging");
+    addEventListener("pointermove", move);
+    addEventListener("pointerup", up);
+    addEventListener("pointercancel", up);
+  }));
 }
 function closeSheet() {
   if (!S.sheet) return;
@@ -588,6 +703,7 @@ async function submitTrade() {
     if (!r.body.ok) { T.error = r.body.message || r.body.error || "Order failed."; return renderReview(); }
     const o = r.body.order;
     closeSheet();
+    navigator.vibrate?.(12);
     toast(o.filled_qty
       ? `${o.side === "buy" ? "Bought" : "Sold"} ${shares(o.filled_qty)} ${o.symbol} at ${usd(o.filled_avg_price)}`
       : `${o.side === "buy" ? "Buy" : "Sell"} order for ${o.symbol} placed`);
@@ -643,6 +759,7 @@ async function load() {
   S.data = p.body;
   S.trades = t.body.trades ?? [];
   S.notes = n.body.notes ?? [];
+  S.updatedAt = Date.now();
   renderMain();
 }
 
@@ -654,7 +771,7 @@ function wireMain() {
     if (!b) return;
     if (b.id === "refresh") {
       b.classList.add("spin");
-      try { await load(); toast("Up to date"); } catch (err) { toast(err.message); }
+      try { await load(); toast("Up to date"); } catch (err) { toast(err.message, "err"); }
       return;
     }
     if (b.id === "limits") return openLimits();
@@ -671,7 +788,7 @@ function wireMain() {
     if (b.dataset.cancel) {
       if (!confirm("Cancel this order?")) return;
       const r = await api("/cancel", { method: "POST", body: JSON.stringify({ order_id: b.dataset.cancel }) });
-      toast(r.body.ok ? "Order canceled" : r.body.message || "Cancel failed");
+      toast(r.body.ok ? "Order canceled" : r.body.message || "Cancel failed", r.body.ok ? "ok" : "err");
       return load();
     }
   });
@@ -682,6 +799,14 @@ function wireMain() {
     if (document.hidden || S.sheet || S.scrubbing || !S.data?.market.is_open) return;
     load().catch(() => {});
   }, 60_000);
+}
+
+function skeletonHtml() {
+  const sk = (w, h, r = 8, extra = "") => `<span class="sk" style="width:${w};height:${h}px;border-radius:${r}px;${extra}"></span>`;
+  const card = (h) => `<section class="card sk-card">${sk("38%", 10)}${sk("100%", h, 12, "margin-top:18px")}</section>`;
+  return `<header class="bar"><div class="mark">${I.mark}<span>Portfolio</span></div><div class="bar-right">${sk("74px", 30, 99)}</div></header>
+    <div class="top"><section class="hero" aria-busy="true" aria-label="Loading">${sk("110px", 10)}${sk("min(78%, 420px)", 72, 14, "margin:16px 0 14px;display:block")}${sk("180px", 26)}</section>${card(96)}</div>
+    <div class="grid"><div class="col">${card(230)}${card(180)}</div><div class="col">${card(80)}${card(160)}</div></div>`;
 }
 
 /* ---------- boot ---------- */
@@ -695,7 +820,7 @@ async function boot() {
   }
   mountShell();
   wireMain();
-  document.getElementById("main").innerHTML = `<div class="skeleton">Loading</div>`;
+  document.getElementById("main").innerHTML = skeletonHtml();
   try {
     await load();
   } catch (err) {
