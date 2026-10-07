@@ -52,10 +52,10 @@
     --accent-soft: rgba(154, 100, 8, 0.1);
     --accent-fg: #7a5206;
     --spy: #6e6a61;
-    --gain: #0b7a45;
-    --loss: #c4382c;
-    --gain-soft: rgba(11, 122, 69, 0.09);
-    --loss-soft: rgba(196, 56, 44, 0.09);
+    --gain: #086a3c;            /* 4.5:1+ even on its own tint over --bg */
+    --loss: #b33226;
+    --gain-soft: rgba(8, 106, 60, 0.09);
+    --loss-soft: rgba(179, 50, 38, 0.09);
     --on-gain: #fffdf8;
     --on-loss: #fffdf8;
     --cat-1: #a86e0b;
@@ -118,12 +118,30 @@ button { cursor: pointer; }
 
 /* Top bar ------------------------------------------------------------------ */
 .bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  height: 52px;
+  height: calc(56px + env(safe-area-inset-top));
+  margin: calc(-1 * max(10px, env(safe-area-inset-top))) calc(-1 * var(--gutter)) 0;
+  padding: env(safe-area-inset-top) var(--gutter) 0;
 }
+.bar::before { /* full-bleed frosted backdrop, wider than the centred content */
+  content: "";
+  position: absolute;
+  inset: 0 calc(50% - 50vw);
+  z-index: -1;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  -webkit-backdrop-filter: saturate(1.4) blur(14px);
+  backdrop-filter: saturate(1.4) blur(14px);
+  border-bottom: 1px solid transparent;
+  opacity: 0;
+  transition: opacity 0.2s, border-color 0.2s;
+}
+.bar.stuck::before { opacity: 1; border-bottom-color: var(--line); }
 .mark {
   display: flex;
   align-items: center;
@@ -133,7 +151,7 @@ button { cursor: pointer; }
   letter-spacing: -0.01em;
 }
 .mark svg { width: 22px; height: 22px; }
-.bar-right { display: flex; align-items: center; gap: 6px; }
+.bar-right { display: flex; align-items: center; gap: 4px; }
 .status {
   display: inline-flex;
   align-items: center;
@@ -152,13 +170,15 @@ button { cursor: pointer; }
 .status .cd { display: none; color: var(--mute); text-transform: none; letter-spacing: 0.02em; }
 .status .cd::before { content: "·"; margin: 0 6px 0 2px; opacity: 0.6; }
 @media (min-width: 920px) { .status .cd { display: inline; } }
+.status.stale { color: var(--loss); border-color: color-mix(in srgb, var(--loss) 40%, transparent); }
+.status.stale i { background: var(--loss); animation: none; }
 .status.open i { background: var(--gain); box-shadow: 0 0 0 0 var(--gain); animation: pulse 2.4s var(--ease) infinite; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--gain) 60%, transparent); } 70%, 100% { box-shadow: 0 0 0 7px transparent; } }
 .icon-btn {
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border: 0;
   border-radius: 12px;
   background: transparent;
@@ -175,8 +195,8 @@ button { cursor: pointer; }
   align-items: center;
   justify-content: center;
   gap: 7px;
-  width: 40px;
-  height: 38px;
+  width: 44px;
+  height: 40px;
   margin-left: 4px;
   padding: 0;
   border: 0;
@@ -265,6 +285,7 @@ button { cursor: pointer; }
 .chip.gain { background: var(--gain-soft); }
 .chip.loss { background: var(--loss-soft); }
 .chip.flat { background: var(--surface-2); color: var(--ink-2); }
+.chip .sep { margin: 0 3px; opacity: 0.55; }
 .chip svg { width: 11px; height: 11px; }
 button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 
@@ -280,12 +301,13 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   .plot-empty { height: 300px; }
 }
 .grid { display: grid; gap: 14px; }
-.col { display: grid; gap: 14px; align-content: start; min-width: 0; }
+.col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 @media (min-width: 920px) {
   :root { --gutter: 28px; }
   .grid { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 18px; }
   .col { gap: 18px; }
-  .hero { padding: 44px 0 30px; }
+  .col:last-child > .card:last-child { flex: 1; } /* the journal fills down to the end of the left column */
+  .hero { padding: 44px 0 0; }
   .equity { font-size: 120px; }
   .meta .mk { display: none; } /* the status pill carries the countdown */
 }
@@ -315,12 +337,11 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 }
 .card-h h2 {
   margin: 0;
-  font: 500 11px/1 var(--mono);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--mute);
+  font: 600 15px/1.2 var(--sans);
+  letter-spacing: -0.01em;
+  color: var(--ink);
 }
-.card-h .aside { font: 500 12px/1 var(--sans); color: var(--mute); font-variant-numeric: tabular-nums; }
+.card-h .aside { font: 500 12px/1.2 var(--sans); color: var(--mute); font-variant-numeric: tabular-nums; text-align: right; }
 
 /* Scoreboard: the point of the experiment ---------------------------------- */
 .score { padding: 20px 18px 18px; }
@@ -342,6 +363,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   font-variant-numeric: tabular-nums;
 }
 .side.spy { text-align: right; }
+.side .ret { color: var(--accent-fg); }
 .side.spy .ret { color: var(--ink-2); }
 .side.spy .who { justify-content: flex-end; }
 .vs-mid { padding-bottom: 8px; font: italic 400 20px/1 var(--serif); color: var(--mute); }
@@ -361,7 +383,8 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 .race { position: relative; height: 4px; margin-top: 14px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
 .race b { position: absolute; top: 0; bottom: 0; border-radius: 4px; transition: left 0.8s var(--ease), width 0.8s var(--ease); }
 .race::after { content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--ctl); }
-.race-scale { display: flex; justify-content: space-between; margin-top: 7px; font: 500 11px/1 var(--mono); color: var(--mute); font-variant-numeric: tabular-nums; }
+.race-scale { display: grid; grid-template-columns: 1fr auto 1fr; margin-top: 7px; font: 500 11px/1 var(--mono); color: var(--mute); font-variant-numeric: tabular-nums; }
+.race-scale span:last-child { justify-self: end; }
 .race-scale .hit { color: var(--ink); }
 
 /* Chart -------------------------------------------------------------------- */
@@ -405,8 +428,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   border-radius: 9px;
   background: transparent;
   color: var(--mute);
-  font: 500 12px/1 var(--mono);
-  letter-spacing: 0.04em;
+  font: 500 13px/1 var(--sans);
   transition: background 0.2s, color 0.2s;
 }
 .tabs button { position: relative; z-index: 1; }
@@ -497,8 +519,8 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   background: var(--surface-2);
 }
 .seg button {
-  height: 32px;
-  padding: 0 13px;
+  height: 34px;
+  padding: 0 14px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -566,30 +588,6 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   color: var(--mute);
 }
 
-/* Floating trade button ---------------------------------------------------- */
-.fab {
-  position: fixed;
-  right: max(var(--gutter), env(safe-area-inset-right));
-  bottom: calc(18px + env(safe-area-inset-bottom));
-  z-index: 20;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 48px;
-  padding: 0 20px 0 16px;
-  border: 0;
-  border-radius: 99px;
-  background: var(--ink);
-  color: var(--bg);
-  font: 600 15px/1 var(--sans);
-  letter-spacing: -0.01em;
-  box-shadow: 0 12px 28px -10px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.2);
-  transition: transform 0.3s var(--ease), opacity 0.2s;
-}
-.fab:active { transform: scale(0.96); }
-.fab.away { transform: translateY(calc(100% + 30px)); opacity: 0; pointer-events: none; }
-.fab svg { width: 17px; height: 17px; }
-
 /* Sheets ------------------------------------------------------------------- */
 .scrim {
   position: fixed;
@@ -631,7 +629,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   .sheet.on { transform: translateY(50%); opacity: 1; }
 }
 .grab { width: 38px; height: 4px; margin: 0 auto 14px; border-radius: 4px; background: var(--line-2); }
-.sheet-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.sheet-h { position: sticky; top: -10px; z-index: 3; display: flex; align-items: center; justify-content: space-between; margin: 0 -20px 6px; padding: 6px 20px 10px; background: var(--surface); }
 .sheet-h h3 { margin: 0; font: 400 30px/1 var(--serif); letter-spacing: -0.01em; outline: none; }
 .field { margin-top: 14px; }
 .field > label, .lbl { display: block; margin-bottom: 7px; font: 500 11px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--mute); }
@@ -645,7 +643,8 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   font-size: 16px; /* no iOS zoom */
   transition: border-color 0.2s, box-shadow 0.2s;
 }
-.input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+.input:focus { outline: none; border-color: var(--accent); }
+.input:focus-visible, .input:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
 .input.sym { font-family: var(--mono); font-size: 18px; letter-spacing: 0.04em; text-transform: uppercase; }
 .input.big { height: 64px; font: 400 34px/1 var(--serif); letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
 .affix { position: relative; }
@@ -711,6 +710,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 }
 .btn:active { transform: scale(0.985); }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn[aria-disabled="true"] { opacity: 0.7; cursor: progress; }
 .btn.buy { background: var(--gain); color: var(--on-gain); }
 .btn.sell { background: var(--loss); color: var(--on-loss); }
 .btn.blocked, .btn.blocked:disabled { background: var(--surface-2); color: var(--mute); border: 1px dashed var(--ctl); opacity: 1; }
@@ -733,6 +733,8 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 .alert { margin-top: 14px; padding: 12px 14px; border-radius: 13px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .alert.err { background: var(--loss-soft); color: var(--loss); }
 .alert.ok { background: var(--gain-soft); color: var(--gain); }
+.alert.warn { margin: 0 0 4px; background: var(--accent-soft); color: var(--ink); }
+.alert.warn b { color: var(--accent-fg); }
 .meter { height: 6px; margin-top: 8px; border-radius: 6px; background: var(--surface-2); overflow: hidden; }
 .meter i { display: block; height: 100%; border-radius: 6px; background: var(--accent); }
 .who-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--mute); }
@@ -741,7 +743,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(86px + env(safe-area-inset-bottom));
+  bottom: calc(24px + env(safe-area-inset-bottom));
   z-index: 60;
   max-width: min(92vw, 460px);
   padding: 12px 16px;
@@ -753,10 +755,11 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.5);
   transform: translate(-50%, 20px);
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
-  transition: transform 0.35s var(--ease), opacity 0.3s;
+  transition: transform 0.35s var(--ease), opacity 0.3s, visibility 0s 0.35s;
 }
-.toast.on { transform: translate(-50%, 0); opacity: 1; }
+.toast.on { transform: translate(-50%, 0); opacity: 1; visibility: visible; transition-delay: 0s; }
 .toast { display: flex; align-items: center; gap: 10px; }
 .toast-i { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 50%; }
 .toast-i svg { width: 12px; height: 12px; }
@@ -796,16 +799,12 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 @keyframes shimmer { from { background-position: 120% 0; } to { background-position: -120% 0; } }
 .skeleton { display: grid; place-items: center; min-height: 70dvh; color: var(--mute); font: 500 11px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; }
 
-@media (min-width: 920px) {
-  .fab { display: none; } /* the top bar carries the Trade button on wide screens */
-}
-
 /* Hover affordances only where a pointer can hover (no sticky hover on touch). */
 @media (hover: hover) {
   .icon-btn:hover { background: var(--surface-2); color: var(--ink); }
   .bar-trade:hover { opacity: 0.88; }
   .tape:hover .tape-track { animation-play-state: paused; }
-  .tabs button:hover { color: var(--ink-2); }
+  .tabs button:not([aria-pressed="true"]):hover { color: var(--ink-2); }
   .h-row:hover { background: var(--surface-2); border-radius: 12px; }
   .h-row:hover + .h-row { border-top-color: transparent; }
   .seg button:hover { color: var(--ink-2); }

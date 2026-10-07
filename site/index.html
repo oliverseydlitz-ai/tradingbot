@@ -21,6 +21,11 @@
 </head>
 <body>
 <div id="app"><div class="skeleton">Loading</div></div>
-<script type="module" src="/app.js"></script>
+<script type="module">
+// If a dependency (the CDN, the config) can't load, say so instead of spinning forever.
+import("/app.js").catch(() => {
+  document.getElementById("app").innerHTML = '<div class="skeleton" style="gap:14px;text-transform:none;letter-spacing:0;font:14px var(--sans)"><span>Couldn\'t load the dashboard. Check your connection.</span><button class="chip flat" style="border:0" onclick="location.reload()">Reload</button></div>';
+});
+</script>
 </body>
 </html>

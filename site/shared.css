@@ -15,7 +15,7 @@
     --bg: #f3f0e8; --surface: #fffdf8; --line: #e6e1d5; --line-2: #d9d3c4; --ctl: #8f8a7e;
     --ink: #151412; --ink-2: #4d4a43; --mute: #6e6a61;
     --accent: #9a6408; --accent-ink: #fffdf8; --accent-soft: rgba(154, 100, 8, 0.1);
-    --loss: #c4382c; --loss-soft: rgba(196, 56, 44, 0.09);
+    --loss: #b33226; --loss-soft: rgba(179, 50, 38, 0.09);
   }
 }
 * { box-sizing: border-box; }

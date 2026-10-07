@@ -1,6 +1,9 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/+esm";
 import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, ALLOWED_GITHUB_LOGIN } from "/config.js";
 
+// Never run inside someone else's frame (clickjacking on the trade buttons).
+if (window.top !== window.self) { document.documentElement.innerHTML = ""; throw new Error("framed"); }
+
 const API = `${SUPABASE_URL}/functions/v1/mcp/api`;
 const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 const root = document.getElementById("app");
@@ -20,12 +23,16 @@ const usd = (n, d = 2) =>
 const usdShort = (n) => (Math.abs(n) >= 1000 ? usd(n, 0) : usd(n));
 const pct = (n, d = 2) => `${sign(n, d)}${Math.abs(round(n, d)).toFixed(d)}%`;
 const pts = (n) => `${sign(n)}${Math.abs(round(n, 2)).toFixed(2)} pts`;
-// Amounts typed by hand: "1,250.50" is fine, "1.2.3" is not.
-const parseAmount = (s) => { const t = String(s ?? "").replace(/[,\s]/g, ""); return /^(\d+\.?\d*|\.\d+)$/.test(t) ? Number(t) : NaN; };
+// Amounts typed by hand: "1,250.50" is fine; "1,5" (a decimal comma) and "1.2.3" are rejected, never guessed.
+const parseAmount = (s) => {
+  const t = String(s ?? "").replace(/\s/g, "");
+  return /^(\d{1,3}(,\d{3})+|\d+)(\.\d*)?$|^\.\d+$/.test(t) ? Number(t.replace(/,/g, "")) : NaN;
+};
 const cleanName = (n) => String(n ?? "").replace(/\s+(Class [A-Z] )?(Common|Ordinary) (Stock|Shares)$/i, "").replace(/\s+Common Stock$/i, "");
 const shares = (q) => q.toLocaleString("en-US", { maximumFractionDigits: 4 });
 const dayFmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
-const fmtDay = (ymd) => dayFmt.format(new Date(`${ymd}T12:00:00Z`));
+const yearFmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+const fmtDay = (ymd, yr = false) => (yr ? yearFmt : dayFmt).format(new Date(`${ymd}T12:00:00Z`));
 function relTime(iso) {
   const t = new Date(iso).getTime(), s = (Date.now() - t) / 1000;
   if (s < 60) return "now";
@@ -114,24 +121,33 @@ const S = {
   expired: false,
   tradesAt: 0,      // when the trade log last loaded successfully
 };
-const T = { symbol: "", side: "buy", size: "notional", type: "market", amount: "", limit: "", note: "", quote: null, review: false, busy: false, error: null };
+const T = { symbol: "", side: "buy", size: "notional", type: "market", amount: "", limit: "", note: "", quote: null, review: false, busy: false, busyText: "", requoting: false, error: null, hint: "" };
 
+const timeoutSignal = (ms) => {
+  if (AbortSignal.timeout) return AbortSignal.timeout(ms);
+  const c = new AbortController();
+  setTimeout(() => c.abort(new DOMException("timeout", "TimeoutError")), ms);
+  return c.signal;
+};
 async function api(path, { timeout = 20_000, ...opts } = {}) {
   const { data: { session } } = await sb.auth.getSession();
   if (!session) { expire(); throw new Error("Signed out."); }
-  let res;
+  const lost = (e) => new Error(e?.name === "TimeoutError" || e?.name === "AbortError" ? "The server took too long to answer." : "Network error. Check your connection.");
+  let res, body;
   try {
     res = await fetch(API + path, {
       ...opts,
-      signal: AbortSignal.timeout?.(timeout),
+      signal: timeoutSignal(timeout),
       headers: { authorization: `Bearer ${session.access_token}`, "content-type": "application/json" },
     });
+    body = await res.json().catch((e) => (e?.name === "SyntaxError" ? null : Promise.reject(e)));
   } catch (e) {
-    throw new Error(e?.name === "TimeoutError" ? "The server took too long to answer." : "Network error. Check your connection.");
+    throw lost(e); // includes a response cut off mid-body (e.g. the phone suspended the page)
   }
-  const body = await res.json().catch(() => ({}));
-  if (res.status === 401) { await sb.auth.signOut().catch(() => {}); expire(); throw new Error("Your session expired."); }
-  return { status: res.status, body };
+  if (res.status === 401) { await sb.auth.signOut({ scope: "local" }).catch(() => {}); expire(); throw new Error("Your session expired."); }
+  // A 2xx without a readable body is not a success we can trust.
+  if (res.ok && body == null) throw new Error("The server's answer was cut off.");
+  return { status: res.status, body: body ?? {}, json: body != null };
 }
 
 // Session gone: back to the sign-in screen once, without a reload loop.
@@ -165,24 +181,26 @@ function renderGate(note) {
     sb.auth.signInWithOAuth({ provider: "github", options: { redirectTo: location.origin + "/" } });
 }
 
-/* ---------- shell (persistent: sheets, fab, toast survive re-renders) ---------- */
-let fabIO, barIO, fabNear = false, barSeen = true;
+/* ---------- shell (persistent: sheets and toast survive re-renders) ---------- */
 function mountShell() {
   root.innerHTML = `<main class="shell" id="main"></main>
-    <button class="fab away" id="fab">${I.plus}<span>Trade</span></button>
     <div class="scrim" id="scrim"></div>
     <section class="sheet" id="sheet-trade" role="dialog" aria-modal="true" aria-labelledby="t-title"></section>
     <section class="sheet" id="sheet-limits" role="dialog" aria-modal="true" aria-labelledby="l-title"></section>
-    <div class="toast" id="toast" role="status" aria-live="polite"></div>`;
-  document.getElementById("fab").onclick = () => openTrade();
-  document.getElementById("scrim").onclick = closeSheet;
+    <div class="toast" id="toast" aria-hidden="true"></div>
+    <div class="sr" id="live-polite" role="status" aria-live="polite"></div>
+    <div class="sr" id="live-alert" role="alert"></div>`;
+  document.getElementById("scrim").onclick = () => closeSheet();
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && S.sheet) closeSheet(); });
-  // The floating Trade button steps aside while the chart sits in the bottom band, so it never covers the plot or the period tabs.
-  // It also stays hidden while the top bar (which has its own Trade button) is on screen.
-  if ("IntersectionObserver" in window) {
-    fabIO = new IntersectionObserver((es) => { fabNear = es.some((e) => e.isIntersecting); syncFab(); }, { rootMargin: "-84% 0px 0px 0px" });
-    barIO = new IntersectionObserver((es) => { barSeen = es.some((e) => e.isIntersecting); syncFab(); });
-  } else barSeen = false;
+  // Back (Android button, iOS edge swipe) closes an open sheet instead of leaving the page.
+  addEventListener("popstate", () => {
+    if (!S.sheet) return;
+    if (!canClose()) { history.pushState({ sheet: S.sheet }, ""); return; }
+    closeSheet(true);
+  });
+  // A hairline under the sticky top bar once content scrolls beneath it.
+  const stuck = () => document.querySelector(".bar")?.classList.toggle("stuck", scrollY > 4);
+  addEventListener("scroll", stuck, { passive: true });
   // Keep a bottom sheet above the on-screen keyboard (iOS overlays it instead of resizing the page).
   const vv = window.visualViewport;
   const fit = () => {
@@ -192,18 +210,17 @@ function mountShell() {
   vv?.addEventListener("resize", fit);
   vv?.addEventListener("scroll", fit);
 }
-function syncFab() {
-  document.getElementById("fab")?.classList.toggle("away", barSeen || fabNear || S.scrubbing);
-}
 
 let toastTimer;
 function toast(msg, kind = "ok") {
   const t = document.getElementById("toast");
   if (!t) return;
-  t.setAttribute("role", kind === "err" ? "alert" : "status");
-  t.setAttribute("aria-live", kind === "err" ? "assertive" : "polite");
   t.innerHTML = `<span class="toast-i ${kind}">${kind === "ok" ? I.check : I.warn}</span><span>${esc(msg)}</span>`;
   t.classList.add("on");
+  // Announce through regions that always exist; the visual toast itself stays out of the accessibility tree.
+  const live = document.getElementById(kind === "err" ? "live-alert" : "live-polite");
+  live.textContent = "";
+  setTimeout(() => (live.textContent = msg), 60);
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove("on"), kind === "err" ? 5000 : 3200);
 }
@@ -220,13 +237,13 @@ function heroHtml(d) {
   const mk = marketBits(d.market);
   const all = S.history.all ?? [];
   const since = all.length >= 2 ? (() => {
-    const diff = a.equity - all[0].equity, p = (a.equity / all[0].equity - 1) * 100;
-    return `<span>All-time <b class="${tone(diff)}">${sign(diff)}${usd(Math.abs(diff))} (${pct(p)})</b></span>`;
+    const diff = a.equity - all[0].equity; // the percentage lives in the race card
+    return `<span>All-time <b class="${tone(diff)}">${sign(diff)}${usd(Math.abs(diff))}</b></span>`;
   })() : "";
   return `<section class="hero" aria-labelledby="eq-l">
     <h2 class="eyebrow" id="eq-l" style="margin:0">Paper equity</h2>
     <div class="equity num" id="equity" data-v="${a.equity}" data-tick="equity">${money(a.equity)}</div>
-    <div class="delta">${deltaChip(a.day_pl, `${sign(a.day_pl)}${usd(Math.abs(a.day_pl))}`)}<span class="${tone(a.day_pl_pct) === "flat" ? "mute" : tone(a.day_pl_pct)}">${pct(a.day_pl_pct)}</span><span class="mute">today</span></div>
+    <div class="delta">${deltaChip(a.day_pl, `${sign(a.day_pl)}${usd(Math.abs(a.day_pl))}<span class="sep">·</span>${pct(a.day_pl_pct ?? 0)}`)}<span class="mute">today</span></div>
     <div class="meta">${since}<span class="mk">${esc(mk.line)}</span></div>
   </section>`;
 }
@@ -249,7 +266,8 @@ function scoreHtml() {
       <div class="vs"><div class="side"><div class="who"><i></i>Claude</div><div class="ret num">0.00%</div></div><div class="vs-mid">vs</div><div class="side spy"><div class="who"><i></i>SPY</div><div class="ret num">0.00%</div></div></div>
       <div class="verdict"><span><strong>Day one.</strong> The scoreboard starts after the first full trading day.</span></div></section>`;
   }
-  const end = last(p), c = end.portfolio - 100, s = end.spy - 100, lead = round(c - s, 2);
+  // The lead is computed from the two figures as displayed, so the arithmetic on screen always adds up.
+  const end = last(p), c = round(end.portfolio - 100, 2), s = round(end.spy - 100, 2), lead = round(c - s, 2);
   // Tug of war on a fixed ±5-point scale: the bar pulls toward whoever leads (Claude left, SPY right).
   const D = 5, over = Math.abs(lead) > D, half = Math.min(Math.abs(lead) / D, 1) * 50;
   const bar = lead >= 0
@@ -260,19 +278,19 @@ function scoreHtml() {
     : lead > 0 ? `<strong>Claude leads</strong> by ${pts(lead).slice(1)}` : `<strong>SPY leads</strong> by ${pts(-lead).slice(1)}`;
   return `<section class="card score"><div class="card-h"><h2>The race</h2><span class="aside">since ${esc(fmtDay(p[0].date))}</span></div>
     <div class="vs">
-      <div class="side"><div class="who"><i></i>Claude</div><div class="ret num ${tone(c)}">${pct(c)}</div></div>
+      <div class="side"><div class="who"><i></i>Claude</div><div class="ret num">${pct(c)}</div></div>
       <div class="vs-mid">vs</div>
       <div class="side spy"><div class="who"><i></i>SPY</div><div class="ret num">${pct(s)}</div></div>
     </div>
     <div class="race" role="img" aria-label="${esc(lead === 0 ? "Even" : `${lead > 0 ? "Claude" : "SPY"} ahead by ${pts(Math.abs(lead)).slice(1)}`)}">${bar}</div>
     <div class="race-scale" aria-hidden="true"><span class="${over && lead > 0 ? "hit" : ""}">${over && lead > 0 ? "◂ " : ""}Claude +${D}</span><span>even</span><span class="${over && lead < 0 ? "hit" : ""}">SPY +${D}${over && lead < 0 ? " ▸" : ""}</span></div>
-    <div class="verdict"><span>${verdict}</span><span class="mono-s">Ahead ${ahead} of ${p.length - 1} days</span></div>
+    <div class="verdict"><span>${verdict}</span><span class="mono-s">Ahead ${ahead} of ${p.length - 1} day${p.length === 2 ? "" : "s"}</span></div>
   </section>`;
 }
 
 function chartCardHtml() {
   const p = S.history[S.period] ?? [];
-  const periods = [["1W", "1W"], ["1M", "1M"], ["3M", "3M"], ["6M", "6M"], ["1A", "1Y"], ["all", "All"]];
+  const periods = [["1W", "1W", "1 week"], ["1M", "1M", "1 month"], ["3M", "3M", "3 months"], ["6M", "6M", "6 months"], ["1A", "1Y", "1 year"], ["all", "All", "All time"]];
   const body = p.length < 2
     ? `<div class="plot-empty"><div><b>Building history</b>The curve appears once the account has two trading days on record.</div></div>`
     : `<div class="plot" id="plot"></div>`;
@@ -284,7 +302,7 @@ function chartCardHtml() {
       <span class="when" id="ro-w"></span>
     </div>
     ${body}
-    <div class="tabs" role="group" aria-label="Period"><span class="tab-ind" aria-hidden="true"></span>${periods.map(([k, l]) => `<button data-period="${k}" aria-pressed="${k === S.period}">${l}</button>`).join("")}</div>
+    <div class="tabs" role="group" aria-label="Period"><span class="tab-ind" aria-hidden="true"></span>${periods.map(([k, l, full]) => `<button data-period="${k}" aria-pressed="${k === S.period}" aria-label="${full}">${l}</button>`).join("")}</div>
   </section>`;
 }
 
@@ -304,14 +322,15 @@ function performanceHtml(d) {
   const rows = [...d.positions].sort((a, b) => b.unrealized_pl_pct - a.unrealized_pl_pct);
   if (!rows.length) return "";
   // One runaway winner shouldn't flatten every other bar: cap the scale near the runner-up and mark clipped bars.
-  const mags = rows.map((r) => Math.abs(r.unrealized_pl_pct)).sort((a, b) => b - a);
-  const cap = mags.length >= 4 && mags[0] > 2.5 * mags[1] ? mags[1] * 1.4 : mags[0];
+  const nz = rows.map((r) => Math.abs(r.unrealized_pl_pct)).filter((m) => m >= 0.005).sort((a, b) => b - a);
+  const ref = nz.length ? nz[Math.floor(nz.length / 2)] : 0; // the median move
+  const cap = ref > 0 && nz[0] > 3 * ref ? ref * 3 : (nz[0] ?? 0);
   const max = Math.max(0.5, cap);
   const fill = { gain: "var(--gain)", loss: "var(--loss)", flat: "var(--mute)" };
   return `<section class="card"><div class="card-h"><h2>Best to worst</h2><span class="aside">return since entry</span></div>
     <div class="perf">${rows.map((r, i) => {
       const v = r.unrealized_pl_pct, t = tone(v), neg = t === "loss", clip = Math.abs(v) > max;
-      const w = Math.max((Math.min(Math.abs(v), max) / max) * 50, 0.6);
+      const w = t === "flat" ? 0 : Math.max((Math.min(Math.abs(v), max) / max) * 50, 1.2);
       return `<div class="perf-row"><span class="s">${esc(r.symbol)}</span>
         <span class="t"><b class="${clip ? `clip${neg ? " neg" : ""}` : ""}" style="left:${neg ? 50 - w : 50}%;width:${w}%;background:${fill[t]};--o:${neg ? "right" : "left"};animation-delay:${i * 40}ms"></b></span>
         <span class="v ${t}">${pct(v)}</span></div>`;
@@ -395,7 +414,7 @@ function feedHtml() {
   };
   const list = tab === "journal"
     ? (S.notes.length ? grouped(S.notes, noteEvent) : `<p class="empty">Claude hasn't written a note yet. Each scheduled run ends with one.</p>`)
-    : (S.trades.length ? grouped(S.trades, tradeEvent) : `<p class="empty">No trades yet.</p>`);
+    : (S.trades.length ? grouped(S.trades, tradeEvent) : `<p class="empty">${S.tradesAt ? "No trades yet." : "Couldn't load the trade log. Refresh to try again."}</p>`);
   return `<section class="card"><div class="card-h" style="align-items:center"><h2>${tab === "journal" ? "Claude's journal" : "Trade log"}</h2>
       <div class="seg" role="group" aria-label="Feed"><button data-feed="journal" aria-pressed="${tab === "journal"}">Journal</button><button data-feed="trades" aria-pressed="${tab === "trades"}">Trades</button></div></div>
     <div class="feed">${list}</div></section>`;
@@ -412,8 +431,14 @@ function focusKey(el) {
 }
 const refocus = (key) => { if (key) document.querySelector(key)?.focus({ preventScroll: true }); };
 
-function renderMain() {
+let lastRender = "";
+function renderMain(force = false) {
   const d = S.data;
+  // A quiet refresh that brought nothing new leaves the page (and a screen reader's place in it) alone.
+  const sig = JSON.stringify([d, S.trades, S.notes, S.history[S.period], S.history.all, S.period, S.feed]);
+  if (!force && sig === lastRender) { markFresh(); return; }
+  lastRender = sig;
+  S.stale = false;
   const mk = marketBits(d.market);
   const main = document.getElementById("main");
   const had = main.contains(document.activeElement) ? focusKey(document.activeElement) : null;
@@ -422,7 +447,7 @@ function renderMain() {
     <header class="bar">
       <div class="mark">${I.mark}<span>Portfolio</span></div>
       <div class="bar-right">
-        <span class="status ${mk.cls}" title="${esc(mk.line)}"><i></i>${mk.chip}<span class="cd">${esc(mk.cd)}</span></span>
+        <span class="status ${mk.cls}" id="status" title="${esc(mk.line)}"><i></i><span class="st">${mk.chip}</span><span class="cd">${esc(mk.cd)}</span></span>
         <button class="icon-btn" id="refresh" aria-label="Refresh">${I.refresh}</button>
         <button class="icon-btn" id="limits" aria-label="Limits and account">${I.sliders}</button>
         <button class="bar-trade" id="bar-trade" title="New trade">${I.plus}<span>Trade</span></button>
@@ -431,23 +456,36 @@ function renderMain() {
     ${tapeHtml(d)}
     <div class="top">${heroHtml(d)}${scoreHtml()}</div>
     <div class="grid">
-      <div class="col">${chartCardHtml()}${holdingsHtml(d)}${openOrdersHtml(d)}</div>
-      <div class="col">${allocationHtml(d)}${performanceHtml(d)}${feedHtml()}</div>
+      <div class="col">${chartCardHtml()}${holdingsHtml(d)}</div>
+      <div class="col">${openOrdersHtml(d)}${allocationHtml(d)}${performanceHtml(d)}${feedHtml()}</div>
     </div>
-    <footer class="foot"><span>Alpaca paper account · IEX data · updated ${esc(clock(S.updatedAt ?? Date.now()))}${d.market.is_open ? " · live" : ""}</span><span>Signed in as ${esc(S.login)}</span></footer>`;
+    <footer class="foot"><span>Alpaca paper account · IEX data · <span id="upd">updated ${esc(clock(S.updatedAt ?? Date.now()))}${d.market.is_open ? " · live" : ""}</span></span><span>Signed in as ${esc(S.login)}</span></footer>`;
   if (!S.firstPaint) main.classList.add("settled");
   mountChart();
+  slideTabs();
   if (S.firstPaint) countUp();
   flashTicks(main);
   refocus(had);
-  if (fabIO) {
-    fabIO.disconnect(); barIO.disconnect();
-    const c = main.querySelector(".chart-card"); if (c) fabIO.observe(c);
-    barIO.observe(main.querySelector(".bar"));
-  }
+  main.querySelector(".bar").classList.toggle("stuck", scrollY > 4);
   const t = tone(d.account.day_pl_pct);
   document.title = `${usd(d.account.equity, 0)} ${t === "loss" ? "▼" : t === "gain" ? "▲" : "·"} ${Math.abs(round(d.account.day_pl_pct, 2)).toFixed(2)}% · Portfolio`;
   S.firstPaint = false;
+}
+
+// The status pill and footer say plainly when the numbers on screen are no longer live.
+function markFresh() {
+  S.stale = false;
+  const upd = document.getElementById("upd");
+  if (upd) upd.textContent = `updated ${clock(S.updatedAt ?? Date.now())}${S.data?.market.is_open ? " · live" : ""}`;
+  const st = document.getElementById("status");
+  if (st?.classList.contains("stale")) renderMain(true);
+}
+function markStale() {
+  if (S.stale || !S.data) return;
+  S.stale = true;
+  const st = document.getElementById("status"), upd = document.getElementById("upd");
+  if (st) { st.className = "status stale"; st.querySelector(".st").textContent = "Offline"; st.title = `Can't reach the server. Last update ${clock(S.updatedAt)}.`; }
+  if (upd) upd.textContent = `offline · last update ${clock(S.updatedAt)}`;
 }
 
 // Values that moved since the last refresh flash once in the direction they moved.
@@ -484,7 +522,8 @@ function niceStep(range) {
 function mountChart() {
   const el = document.getElementById("plot");
   const points = S.history[S.period] ?? [];
-  const range = points.length >= 2 ? `${fmtDay(points[0].date)} – ${fmtDay(last(points).date)}` : "";
+  const yr = points.length > 1 && points[0].date.slice(0, 4) !== last(points).date.slice(0, 4); // add years once the range spans two
+  const range = points.length >= 2 ? `${fmtDay(points[0].date, yr)} – ${fmtDay(last(points).date, yr)}` : "";
   // Idle, the readout is just the legend; values appear while scrubbing (the line-end tags already show the latest).
   const setReadout = (p, label) => {
     const rp = document.getElementById("ro-p"), rs = document.getElementById("ro-s"), rw = document.getElementById("ro-w");
@@ -522,6 +561,9 @@ function mountChart() {
   const tag = (ty, text, fill, ink, stroke) =>
     `<g class="fade" transform="translate(${W - tagW - 1} ${ty - 9.5})"><rect width="${tagW}" height="19" rx="5" fill="${fill}" ${stroke ? `stroke="${stroke}"` : ""}/><text x="${tagW / 2}" y="13.2" text-anchor="middle" font-size="11" font-weight="500" font-family="var(--mono)" fill="${ink}">${esc(text)}</text></g>`;
   const nearTag = (yy) => Math.abs(yy - tp) < 14 || Math.abs(yy - ts) < 14;
+  // When the tags had to be nudged apart, a short leader ties each one back to its line's end.
+  const leader = (ty, yTrue, col) => Math.abs(ty - yTrue) > 1.5
+    ? `<path class="fade" d="M${x(n - 1) + 4} ${yTrue.toFixed(1)}L${W - tagW - 1} ${ty.toFixed(1)}" stroke="${col}" fill="none"/>` : "";
   const gid = `g${Math.random().toString(36).slice(2, 7)}`;
   // The fill is anchored at 0%: amber above the line of no change, a loss tint below it.
   const y0 = y(0), area = `${line("portfolio")}L${x(n - 1).toFixed(1)} ${y0.toFixed(1)}L${x(0).toFixed(1)} ${y0.toFixed(1)}Z`;
@@ -551,18 +593,18 @@ function mountChart() {
     <path class="fade" d="${area}" fill="url(#${gid}d)" clip-path="url(#${gid}b)"/>
     <path class="fade" d="${line("spy")}" fill="none" stroke="var(--spy)" stroke-width="1.5" stroke-dasharray="4 4" stroke-linejoin="round" opacity=".85"/>
     <path class="draw" d="${line("portfolio")}" fill="none" stroke="var(--accent)" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
+    ${leader(tp, y(endP), "var(--accent)")}${leader(ts, y(endS), "var(--ctl)")}
     <circle class="halo" cx="${x(n - 1)}" cy="${y(endP)}" r="3.5" fill="var(--accent)"/>
     <circle class="fade" cx="${x(n - 1)}" cy="${y(endP)}" r="3.5" fill="var(--accent)"/>
     ${tag(ts, tagS, "var(--surface-2)", "var(--ink-2)", "var(--ctl)")}
     ${tag(tp, tagP, "var(--accent)", "var(--accent-ink)")}
-    <g class="xl">${xl.map((i, k) => `<text x="${x(i)}" y="${H - 7}" font-size="11" font-family="var(--mono)" fill="var(--mute)" text-anchor="${k === 0 ? "start" : k === xl.length - 1 ? "end" : "middle"}">${esc(fmtDay(points[i].date))}</text>`).join("")}</g>
+    <g class="xl">${xl.map((i, k) => `<text x="${x(i)}" y="${H - 7}" font-size="11" font-family="var(--mono)" fill="var(--mute)" text-anchor="${k === 0 ? "start" : k === xl.length - 1 ? "end" : "middle"}">${esc(fmtDay(points[i].date, yr))}</text>`).join("")}</g>
     <g id="xh" style="display:none"><line y1="${padT}" y2="${H - padB}" stroke="var(--ink-2)" stroke-width="1" opacity=".5"/><circle r="4.5" fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/><circle r="4" fill="var(--spy)" stroke="var(--surface)" stroke-width="2"/>
       <g class="xh-pill"><rect y="${H - padB + 6}" height="19" rx="5" fill="var(--ink)"/><text y="${H - padB + 19.5}" text-anchor="middle" font-size="11" font-weight="500" font-family="var(--mono)" fill="var(--bg)"></text></g></g>
   </svg>`;
   // The line-draw animation needs the path's real length.
   el.querySelectorAll("path.draw").forEach((p) => p.style.setProperty("--len", Math.ceil(p.getTotalLength())));
   S.animateChart = false;
-  slideTabs();
 
   const svg = el.firstElementChild, xh = svg.querySelector("#xh"), [vl, c1, c2] = xh.children, xlabels = svg.querySelector(".xl");
   const pill = xh.querySelector(".xh-pill"), pr = pill.querySelector("rect"), pt = pill.querySelector("text");
@@ -573,29 +615,46 @@ function mountChart() {
     vl.setAttribute("x1", cx); vl.setAttribute("x2", cx);
     c1.setAttribute("cx", cx); c1.setAttribute("cy", y(p.portfolio - 100));
     c2.setAttribute("cx", cx); c2.setAttribute("cy", y(p.spy - 100));
-    const label = fmtDay(p.date), pw = label.length * 7 + 14, px = Math.max(padL, Math.min(W - padR - pw, cx - pw / 2));
+    const label = fmtDay(p.date, yr), pw = label.length * 7 + 14, px = Math.max(padL, Math.min(W - padR - pw, cx - pw / 2));
     pt.textContent = label; pt.setAttribute("x", px + pw / 2); pr.setAttribute("x", px); pr.setAttribute("width", pw);
-    setReadout(p, usd(p.equity, 0));
+    setReadout(p, `Equity ${usd(p.equity, 0)}`);
     el.setAttribute("aria-valuenow", String(i));
     el.setAttribute("aria-valuetext", `${label}: Claude ${pct(p.portfolio - 100)}, SPY ${pct(p.spy - 100)}, equity ${usd(p.equity, 0)}`);
-    S.scrubbing = true; syncFab();
+    S.scrubbing = true;
   };
   const hide = () => {
+    clearTimeout(tapTimer);
     xh.style.display = "none"; xlabels.style.opacity = "";
     setReadout(null, range);
     el.setAttribute("aria-valuenow", String(n - 1)); el.setAttribute("aria-valuetext", summary);
-    S.scrubbing = false; syncFab();
+    S.scrubbing = false;
   };
   const at = (ev) => {
     const r = el.getBoundingClientRect();
     return Math.max(0, Math.min(n - 1, Math.round(((ev.clientX - r.left - padL) / (W - padL - padR)) * (n - 1))));
   };
-  let ki = null;
-  el.onpointermove = (e) => { ki = null; show(at(e)); };
-  el.onpointerdown = (e) => { ki = null; show(at(e)); };
-  el.onpointerleave = hide;
-  el.onpointerup = (e) => { if (e.pointerType !== "mouse") hide(); };
-  el.onpointercancel = hide;
+  // Mouse: hover scrubs. Touch: a sideways drag scrubs, a vertical swipe scrolls the page untouched, a tap peeks for a moment.
+  let ki = null, tapTimer, touch = null;
+  el.onpointerdown = (e) => {
+    ki = null;
+    if (e.pointerType === "mouse") return show(at(e));
+    touch = { x: e.clientX, y: e.clientY, on: false };
+  };
+  el.onpointermove = (e) => {
+    ki = null;
+    if (e.pointerType === "mouse") return show(at(e));
+    if (!touch) return;
+    if (!touch.on && Math.abs(e.clientX - touch.x) > 6 && Math.abs(e.clientX - touch.x) > Math.abs(e.clientY - touch.y)) touch.on = true;
+    if (touch.on) show(at(e));
+  };
+  el.onpointerup = (e) => {
+    if (e.pointerType === "mouse") return;
+    const tapped = touch && !touch.on;
+    touch = null;
+    if (tapped) { show(at(e)); clearTimeout(tapTimer); tapTimer = setTimeout(hide, 2200); } else hide();
+  };
+  el.onpointerleave = (e) => { if (e.pointerType === "mouse") hide(); };
+  el.onpointercancel = () => { touch = null; hide(); };
   el.onblur = () => { ki = null; hide(); };
   el.onkeydown = (e) => {
     const moves = { ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1, PageDown: -5, PageUp: 5 };
@@ -624,7 +683,19 @@ function slideTabs() {
 
 /* ---------- sheets ---------- */
 let lastFocus = null;
-const setInert = (on) => ["main", "fab"].forEach((id) => { const e = document.getElementById(id); if (e) e.inert = on; });
+const setInert = (on) => { document.getElementById("main").inert = on; };
+// While an order is in flight the ticket can't be dismissed: closing it would hide the outcome and invite a second order.
+const canClose = () => !(S.sheet === "sheet-trade" && T.busy);
+// Tab and Shift+Tab cycle inside the open sheet.
+function trapTab(e) {
+  if (e.key !== "Tab" || !S.sheet) return;
+  const f = [...document.getElementById(S.sheet).querySelectorAll("button:not(:disabled), input:not(:disabled), [tabindex='0'], [aria-disabled='true']")]
+    .filter((x) => x.offsetParent !== null);
+  if (!f.length) return;
+  const first = f[0], end = last(f), a = document.activeElement;
+  if (e.shiftKey && (a === first || !f.includes(a))) { e.preventDefault(); end.focus(); }
+  else if (!e.shiftKey && (a === end || !f.includes(a))) { e.preventDefault(); first.focus(); }
+}
 // focusSel: the field to focus with a keyboard and mouse. On touch, focus goes to the title so the keyboard doesn't jump up.
 function openSheet(id, focusSel) {
   lastFocus = focusKey(document.activeElement);
@@ -636,6 +707,8 @@ function openSheet(id, focusSel) {
   sheet.classList.add("on");
   document.body.style.overflow = "hidden";
   setInert(true);
+  document.addEventListener("keydown", trapTab);
+  if (history.state?.sheet !== id) history.pushState({ sheet: id }, "");
   enableSwipe(sheet);
   const target = (finePointer && focusSel && sheet.querySelector(focusSel)) || sheet.querySelector("h3");
   target?.focus({ preventScroll: true });
@@ -670,8 +743,10 @@ function enableSwipe(sheet) {
     addEventListener("pointercancel", up);
   }));
 }
-function closeSheet() {
-  if (!S.sheet) return;
+function closeSheet(fromHistory = false) {
+  if (!S.sheet || !canClose()) return;
+  document.removeEventListener("keydown", trapTab);
+  if (!fromHistory && history.state?.sheet) history.back();
   document.getElementById(S.sheet).classList.remove("on");
   document.getElementById("scrim").classList.remove("on");
   document.body.style.overflow = "";
@@ -690,16 +765,18 @@ const estPrice = () => {
 };
 
 function openTrade(symbol = "") {
-  Object.assign(T, { symbol, side: "buy", size: "notional", type: "market", amount: "", limit: "", note: "", quote: null, review: false, busy: false, error: null });
+  if (inFlight) return reopenInFlight();
+  Object.assign(T, { symbol, side: "buy", size: "notional", type: "market", amount: "", limit: "", note: "", quote: null, review: false, busy: false, requoting: false, error: null, hint: "" });
   const el = document.getElementById("sheet-trade");
   el.innerHTML = `<div class="grab" aria-hidden="true"></div>
     <div class="sheet-h"><h3 id="t-title" tabindex="-1">${symbol ? `Trade <span class="mono">${esc(symbol)}</span>` : "New trade"}</h3><button class="icon-btn" data-close aria-label="Close">${I.close}</button></div>
+    <div id="t-mkt"></div>
     <div class="field"><label for="t-sym">Symbol</label><input class="input sym" id="t-sym" value="${esc(symbol)}" placeholder="SPY" maxlength="7" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" enterkeyhint="next"><div id="t-quote" aria-live="polite"></div></div>
     <div class="field"><div class="side-toggle" role="group" aria-label="Side"><button class="b" data-side="buy" aria-pressed="true">Buy</button><button class="s" data-side="sell" aria-pressed="false">Sell</button></div></div>
     <div class="field"><div class="row2">
-      <div><span class="lbl">Size in</span><div class="mini-seg" role="group" aria-label="Size in"><button data-size="notional" aria-pressed="true">Dollars</button><button data-size="qty" aria-pressed="false">Shares</button></div></div>
-      <div><span class="lbl">Order</span><div class="mini-seg" role="group" aria-label="Order type"><button data-type="market" aria-pressed="true">Market</button><button data-type="limit" aria-pressed="false">Limit</button></div></div>
-    </div></div>
+      <div><span class="lbl" id="t-size-l">Size in</span><div class="mini-seg" role="group" aria-labelledby="t-size-l"><button data-size="notional" aria-pressed="true">Dollars</button><button data-size="qty" aria-pressed="false">Shares</button></div></div>
+      <div><span class="lbl" id="t-type-l">Order</span><div class="mini-seg" role="group" aria-labelledby="t-type-l"><button data-type="market" aria-pressed="true">Market</button><button data-type="limit" aria-pressed="false">Limit</button></div></div>
+    </div><p class="hint" id="t-hint" aria-live="polite" hidden></p></div>
     <div class="field"><label for="t-amt" id="t-amt-l">Amount</label><div class="affix"><span class="pre" id="t-pre" aria-hidden="true">$</span><input class="input big" id="t-amt" inputmode="decimal" placeholder="0" autocomplete="off" enterkeyhint="done"></div><div class="chips" id="t-chips"></div></div>
     <div class="field" id="t-lim-f" hidden><label for="t-lim">Limit price</label><div class="affix"><span class="pre" aria-hidden="true">$</span><input class="input big" id="t-lim" inputmode="decimal" placeholder="0.00" autocomplete="off" enterkeyhint="done"></div></div>
     <div class="field"><label for="t-note">Note <span style="text-transform:none;letter-spacing:0">(optional, logged)</span></label><input class="input" id="t-note" maxlength="500" placeholder="Why this trade?" autocomplete="off" enterkeyhint="done"></div>
@@ -709,25 +786,70 @@ function openTrade(symbol = "") {
   refreshTicket();
   if (symbol) fetchQuote();
 }
+// The ticket is locked while an order is in flight; asking for a new one just brings that one back.
+function reopenInFlight() {
+  if (S.sheet) return;
+  openSheet("sheet-trade");
+  renderReview();
+}
 
-let quoteTimer;
+// Market hours from the last load. The clock times keep it right even when that load is a few minutes old.
+function marketOpenNow() {
+  const m = S.data?.market;
+  if (!m) return true;
+  return m.is_open ? Date.now() < new Date(m.next_close).getTime() : Date.now() >= new Date(m.next_open).getTime();
+}
+
+// How big a buy the server's guardrails would accept right now, and which rule binds first (mirrors guardrails.ts).
+function buyRoom() {
+  const { account, settings, open_orders } = S.data, eq = account.equity;
+  const held = position(T.symbol)?.market_value ?? 0;
+  const committed = open_orders.filter((o) => o.side === "buy")
+    .reduce((sum, o) => sum + (Number(o.notional) || Number(o.qty) * Number(o.limit_price) || 0), 0);
+  return [
+    { rule: "your max order", pct: settings.maxOrderPct, cap: (eq * settings.maxOrderPct) / 100 },
+    { rule: "your max position", pct: settings.maxPositionPct, cap: (eq * settings.maxPositionPct) / 100 - held },
+    { rule: "your available cash", cap: account.cash - committed },
+  ].reduce((a, b) => (b.cap < a.cap ? b : a));
+}
+// Shares you can sell: held minus what open sell orders already earmark.
+function sellable() {
+  const p = position(T.symbol);
+  if (!p) return 0;
+  const earmarked = S.data.open_orders.filter((o) => o.side === "sell" && o.symbol === T.symbol).reduce((s, o) => s + (Number(o.qty) || 0), 0);
+  return Math.max(0, p.qty - earmarked);
+}
+// The largest size that fits the binding rule, with a little headroom for the price moving.
+function fitSize(price) {
+  const cap = buyRoom().cap * 0.99;
+  if (cap < 1) return null;
+  if (T.size === "notional") return String(Math.floor(cap));
+  if (!price) return null;
+  const whole = T.type === "limit" || T.quote?.fractionable === false;
+  const q = whole ? Math.floor(cap / price) : Math.floor((cap / price) * 1e4) / 1e4;
+  return q > 0 ? String(q) : null;
+}
+
+let quoteTimer, quoteSeq = 0;
 // quiet: refresh the price in place (on Review) without the "Looking up" flash.
 async function fetchQuote(quiet = false) {
-  const sym = T.symbol;
+  const sym = T.symbol, seq = ++quoteSeq;
   if (!/^[A-Z]{1,5}(\.[A-Z])?$/.test(sym)) { T.quote = null; return refreshTicket(); }
   const box = document.getElementById("t-quote");
   if (box && !quiet) box.innerHTML = `<div class="quote"><span class="n">Looking up ${esc(sym)}…</span></div>`;
   let q;
   try {
     const r = await api(`/quote?symbol=${encodeURIComponent(sym)}`, { timeout: 10_000 });
+    // Only the server saying "no such ticker" is final; anything else (a gateway error, a rate limit) is soft.
     q = r.status === 200 ? r.body
-      : r.status < 500 ? { error: r.body.error || `${sym} isn't a known ticker.` }
+      : (r.status === 404 || r.status === 400) && r.json && r.body.error ? { error: `${sym} isn't a known ticker.` }
       : { error: "Couldn't load a quote. You can still place the order.", soft: true };
   } catch (e) {
     q = { error: `Couldn't load a quote (${e.message.replace(/\.$/, "")}). You can still place the order.`, soft: true };
   }
-  if (sym !== T.symbol || !S.sheet) return; // user kept typing, or closed the ticket
+  if (seq !== quoteSeq || sym !== T.symbol || S.sheet !== "sheet-trade") return; // superseded, or the ticket closed
   T.quote = q;
+  if (quiet) { T.requoting = false; return renderReview({ keepScroll: true }); }
   refreshTicket();
 }
 
@@ -735,7 +857,8 @@ function chipsFor() {
   const pos = position(T.symbol);
   if (T.side === "sell") {
     if (!pos) return T.symbol && T.quote && !T.quote.error ? `<span class="hint" style="margin:4px 0 0">You don't hold ${esc(T.symbol)}. Selling needs an existing position.</span>` : "";
-    return [["25%", 0.25], ["50%", 0.5], ["All", 1]].map(([l, f]) => `<button data-frac="${f}">${l} · ${shares(pos.qty * f)} sh</button>`).join("");
+    const avail = sellable();
+    return [["25%", 0.25], ["50%", 0.5], ["All", 1]].map(([l, f]) => `<button data-frac="${f}">${l} · ${shares(f === 1 ? avail : Math.floor(avail * f * 1e4) / 1e4)} sh</button>`).join("");
   }
   return T.size === "notional"
     ? [250, 1000, 2500, 5000].map((v) => `<button data-amt="${v}">${usd(v, 0)}</button>`).join("")
@@ -744,8 +867,10 @@ function chipsFor() {
 
 function refreshTicket() {
   const el = document.getElementById("sheet-trade");
-  if (!el || !S.sheet) return;
+  if (!el || S.sheet !== "sheet-trade") return;
   const q = T.quote, pos = position(T.symbol);
+  el.querySelector("#t-mkt").innerHTML = marketOpenNow() ? ""
+    : `<div class="alert warn" role="status"><b>Market closed.</b> It opens ${esc(opensText(S.data.market.next_open))}. Orders can only be placed while it's open.</div>`;
   const qb = el.querySelector("#t-quote");
   qb.innerHTML = !q ? "" : q.error ? `<div class="quote"><span class="n ${q.soft ? "" : "loss"}" style="white-space:normal">${esc(q.error)}</span></div>`
     : `<div class="quote"><span class="n">${esc(cleanName(q.name))}</span><span class="p">${q.last ? usd(q.last) : "–"}</span>
@@ -753,12 +878,14 @@ function refreshTicket() {
   el.querySelectorAll("[data-side]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.side === T.side));
   el.querySelectorAll("[data-size]").forEach((b) => {
     b.setAttribute("aria-pressed", b.dataset.size === T.size);
-    // Limit orders are sized in shares, so Dollars is off while Limit is picked.
+    // Limit orders are sized in shares: Dollars stays focusable but explains itself when tapped.
     const off = b.dataset.size === "notional" && T.type === "limit";
-    b.disabled = off;
-    b.title = off ? "Limit orders are sized in shares" : "";
+    if (off) { b.setAttribute("aria-disabled", "true"); b.setAttribute("aria-describedby", "t-hint"); }
+    else { b.removeAttribute("aria-disabled"); b.removeAttribute("aria-describedby"); }
   });
   el.querySelectorAll("[data-type]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.type === T.type));
+  const hint = el.querySelector("#t-hint");
+  hint.hidden = !T.hint; hint.textContent = T.hint;
   el.querySelector("#t-pre").hidden = T.size !== "notional";
   el.querySelector("#t-amt").placeholder = T.size === "notional" ? "0" : "0 sh";
   el.querySelector("#t-amt").style.paddingLeft = T.size === "notional" ? "" : "14px";
@@ -768,58 +895,73 @@ function refreshTicket() {
   renderReview();
 }
 
+// Everything the server would reject that we can already see, in plain words.
 function ticketProblem() {
+  if (!marketOpenNow()) return `Market is closed. It opens ${opensText(S.data.market.next_open)}.`;
   if (!/^[A-Z]{1,5}(\.[A-Z])?$/.test(T.symbol)) return "Enter a ticker, e.g. SPY.";
   if (T.quote?.error && !T.quote.soft) return T.quote.error;
+  if (T.quote && !T.quote.error && !T.quote.tradable) return `${T.symbol} can't be traded here.`;
   const amt = parseAmount(T.amount);
-  if (T.amount && Number.isNaN(amt)) return "That amount isn't a number. Use digits and one decimal point.";
+  if (T.amount && Number.isNaN(amt)) return "That amount isn't a number. Use digits, with a dot for decimals (1,250.50).";
   if (!(amt > 0)) return T.size === "notional" ? "Enter an amount in dollars." : "Enter a number of shares.";
+  if (T.size === "notional" && amt < 1) return "Dollar orders start at $1.";
   if (T.type === "limit" && T.size === "notional") return "Limit orders are sized in shares. Switch to Shares.";
-  const lim = parseAmount(T.limit);
-  if (T.type === "limit" && !(lim > 0)) return "Enter a limit price.";
+  if (T.quote?.fractionable === false && (T.size === "notional" || !Number.isInteger(amt))) return `${T.symbol} trades in whole shares only. Switch to Shares and enter a whole number.`;
+  if (T.type === "limit" && !(parseAmount(T.limit) > 0)) return "Enter a limit price.";
+  if (T.side === "sell") {
+    if (!position(T.symbol)) return `You don't hold ${T.symbol}, and short selling isn't allowed.`;
+    const avail = sellable(), price = estPrice();
+    if (T.size === "qty" && amt > avail + 1e-9) return `You can sell at most ${shares(avail)} ${T.symbol}.`;
+    if (T.size === "notional" && price && amt > avail * price + 0.01) return `That's more than your ${T.symbol} position is worth (about ${usd(avail * price)}).`;
+  }
   return null;
 }
 
-// Largest order the max-order limit allows, with a little headroom for the price moving.
-function maxOrderSize(price) {
-  const cap = (S.data.account.equity * S.data.settings.maxOrderPct) / 100 * 0.99;
-  if (T.size === "notional") return String(Math.floor(cap));
-  if (!price) return null;
-  const whole = T.type === "limit" || T.quote?.fractionable === false;
-  const q = whole ? Math.floor(cap / price) : Math.floor((cap / price) * 1e4) / 1e4;
-  return q > 0 ? String(q) : null;
-}
-
-function renderReview() {
+function renderReview({ keepScroll = false } = {}) {
   const box = document.getElementById("t-review");
   if (!box) return;
+  const hadFocus = box.contains(document.activeElement) ? document.activeElement.id : null;
   const err = T.error ? alertHtml(T.error) : "";
-  const sideCls = T.side === "buy" ? "buy" : "sell";
+  if (T.busy) {
+    box.innerHTML = `${err}<div class="actions"><button class="btn ${T.side}" id="t-wait" aria-disabled="true" aria-live="polite">${esc(T.busyText || "Placing…")}</button></div>`;
+    if (hadFocus) box.querySelector("#t-wait").focus();
+    return;
+  }
   if (!T.review) {
     box.innerHTML = `${err}<div class="actions"><button class="btn" id="t-go">Review order</button></div>`;
-    if (T.error) scrollSheetEnd();
+    if (T.error && !keepScroll) scrollSheetEnd();
+    if (hadFocus) box.querySelector("#t-go").focus({ preventScroll: true });
     return;
   }
   const price = estPrice(), amt = parseAmount(T.amount);
   const value = T.size === "notional" ? amt : price ? amt * price : null;
-  const equity = S.data.account.equity, lim = S.data.settings;
+  const equity = S.data.account.equity;
   const pctEq = value != null ? (value / equity) * 100 : null;
-  const over = T.side === "buy" && pctEq != null && pctEq > lim.maxOrderPct;
-  const fit = over ? maxOrderSize(price) : null;
+  const room = T.side === "buy" ? buyRoom() : null;
+  const over = room && value != null && value > room.cap + 0.01;
+  const fit = over ? fitSize(price) : null;
+  const fitLabel = fit ? (T.size === "notional" ? usd(Number(fit), 0) : `${shares(Number(fit))} sh`) : "";
   const warn = over
-    ? `<div class="alert err" role="alert"><b>Over your max order.</b> That's ${pctEq.toFixed(1)}% of equity and your limit is ${esc(lim.maxOrderPct)}%, so the server would block it.${fit ? `<br><button class="btn slim" id="t-fit">Use the max: ${T.size === "notional" ? usd(Number(fit), 0) : `${shares(Number(fit))} sh`}</button>` : ""}</div>` : "";
+    ? `<div class="alert err" role="alert"><b>Too big for ${esc(room.rule)}.</b> ${room.pct != null
+        ? room.rule === "your max position"
+          ? `Positions cap at ${esc(room.pct)}% of equity, which leaves ${usd(Math.max(0, room.cap), 0)} of room in ${esc(T.symbol)}.`
+          : `That's ${pctEq.toFixed(1)}% of equity; the cap is ${esc(room.pct)}% (${usd(room.cap, 0)}).`
+        : `You have ${usd(Math.max(0, room.cap), 0)} to spend.`}</div>` : "";
   box.innerHTML = `<div class="review"><dl>
       <dt>Order</dt><dd>${T.side === "buy" ? "Buy" : "Sell"} <span class="mono">${esc(T.symbol)}</span></dd>
       <dt>Size</dt><dd>${T.size === "notional" ? usd(amt) : `${shares(amt)} sh`}</dd>
-      <dt>${T.type === "limit" ? "Limit" : "Est. price"}</dt><dd>${price ? usd(price) : "–"}</dd>
+      <dt>${T.type === "limit" ? "Limit" : "Est. price"}</dt><dd>${T.requoting ? `<span class="mute">updating…</span>` : price ? usd(price) : "–"}</dd>
       <dt>Est. value</dt><dd>${value != null ? usd(value) : "–"}${pctEq != null ? ` <span class="mute">· ${pctEq.toFixed(1)}% of equity</span>` : ""}</dd>
       <dt>Type</dt><dd>${T.type === "limit" ? "Limit" : "Market"} · day · paper</dd>
     </dl></div>${warn}${err}
-    <div class="actions">
-      <button class="btn ${over ? "blocked" : sideCls}" id="t-confirm" ${T.busy || over ? "disabled" : ""}>${T.busy ? "Placing…" : over ? "Over your limit" : `Confirm ${T.side} · ${esc(T.symbol)}`}</button>
-      <button class="btn ghost" id="t-edit" ${T.busy ? "disabled" : ""}>Edit</button>
+    <div class="actions">${over
+      ? (fit ? `<button class="btn" id="t-fit">Size it down to ${fitLabel}</button>` : `<button class="btn blocked" id="t-confirm" disabled>No room left</button>`)
+      : `<button class="btn ${T.side === "buy" ? "buy" : "sell"}" id="t-confirm" ${T.requoting ? "disabled" : ""}>${T.requoting ? "Updating price…" : `Confirm ${T.side} · ${esc(T.symbol)}`}</button>`}
+      <button class="btn ghost" id="t-edit">Edit</button>
     </div>`;
-  scrollSheetEnd();
+  if (!keepScroll) scrollSheetEnd();
+  // Keep a keyboard user's place when the buttons are rebuilt.
+  if (hadFocus) (box.querySelector(`#${hadFocus}`) ?? box.querySelector("#t-confirm:not(:disabled), #t-fit, #t-edit"))?.focus({ preventScroll: true });
 }
 // The review, any warning and the buttons sit at the end of the ticket: bring all of them into view together.
 function scrollSheetEnd() {
@@ -841,7 +983,7 @@ function wireTrade(el) {
   const num = (inp, key) => inp.addEventListener("input", () => {
     inp.value = inp.value.replace(/[^0-9.,]/g, "");
     T[key] = inp.value;
-    if (T.review || T.error) { T.review = false; T.error = null; renderReview(); }
+    if (T.review || T.error) { T.review = false; T.error = null; renderReview({ keepScroll: true }); }
   });
   num(amt, "amount"); num(lim, "limit");
   note.addEventListener("input", () => (T.note = note.value));
@@ -852,82 +994,93 @@ function wireTrade(el) {
     if (inp === sym) return amt.focus();
     if (!T.review) el.querySelector("#t-go")?.click();
   }));
-  const resetSize = () => { T.amount = ""; amt.value = ""; T.review = false; T.error = null; };
+  // Changing units clears the amount ("100" means something else in shares), and says so.
+  const setSize = (size, why) => {
+    if (size === T.size) return;
+    const had = T.amount !== "";
+    T.size = size; T.amount = ""; amt.value = "";
+    T.hint = had ? why : "";
+  };
   el.onclick = async (e) => {
     const b = e.target.closest("button");
-    if (!b || b.disabled) return;
+    if (!b || b.disabled || T.busy) return;
     if (b.hasAttribute("data-close")) return closeSheet();
+    T.hint = "";
+    if (b.getAttribute("aria-disabled") === "true" && b.dataset.size) {
+      T.hint = "Limit orders are sized in shares. Pick Market to size in dollars.";
+      return refreshTicket();
+    }
     if (b.dataset.side) {
       if (b.dataset.side === T.side) return;
-      T.side = b.dataset.side;
-      if (T.side === "sell" && position(T.symbol)) T.size = "qty";
-      if (T.side === "buy" && T.type === "market") T.size = "notional";
-      resetSize();
+      T.side = b.dataset.side; T.review = false; T.error = null;
+      if (T.side === "sell" && position(T.symbol)) setSize("qty", "Amount cleared: sells are sized in shares.");
+      if (T.side === "buy" && T.type === "market") setSize("notional", "Amount cleared: switched to dollars.");
       return refreshTicket();
     }
-    // Switching between dollars and shares clears the amount: "100" means something else in the other unit.
-    if (b.dataset.size) { if (b.dataset.size !== T.size) { T.size = b.dataset.size; resetSize(); } return refreshTicket(); }
+    if (b.dataset.size) { setSize(b.dataset.size, `Amount cleared: now sized in ${b.dataset.size === "qty" ? "shares" : "dollars"}.`); T.review = false; T.error = null; return refreshTicket(); }
     if (b.dataset.type) {
       if (b.dataset.type === T.type) return;
-      T.type = b.dataset.type;
-      if (T.type === "limit" && T.size !== "qty") { T.size = "qty"; resetSize(); }
-      T.review = false;
+      T.type = b.dataset.type; T.review = false; T.error = null;
+      if (T.type === "limit") setSize("qty", "Amount cleared: limit orders are sized in shares.");
       return refreshTicket();
     }
-    if (b.dataset.amt) { T.amount = b.dataset.amt; amt.value = T.amount; T.review = false; T.error = null; return renderReview(); }
+    if (b.dataset.amt) { T.amount = b.dataset.amt; amt.value = T.amount; T.review = false; T.error = null; return renderReview({ keepScroll: true }); }
     if (b.dataset.frac) {
-      const p = position(T.symbol), f = Number(b.dataset.frac);
-      T.size = "qty"; T.amount = String(f === 1 ? p.qty : Math.floor(p.qty * f * 1e6) / 1e6); amt.value = T.amount; T.review = false; T.error = null;
+      const f = Number(b.dataset.frac), avail = sellable();
+      T.size = "qty"; T.amount = String(f === 1 ? avail : Math.floor(avail * f * 1e4) / 1e4); amt.value = T.amount; T.review = false; T.error = null;
       return refreshTicket();
     }
     if (b.id === "t-go") {
       T.note = note.value.trim();
       const bad = ticketProblem();
       if (bad) { T.error = bad; return renderReview(); }
-      T.error = null; T.review = true; renderReview();
-      if (T.type === "market") fetchQuote(true); // re-price against a fresh quote before Confirm
+      T.error = null; T.review = true;
+      // Share-sized market orders are valued at the live price: fetch a fresh quote before Confirm unlocks.
+      T.requoting = T.type === "market" && T.size === "qty";
+      renderReview();
+      if (T.requoting) fetchQuote(true);
       return;
     }
     if (b.id === "t-fit") {
-      const v = maxOrderSize(estPrice());
-      if (v) { T.amount = v; amt.value = v; renderReview(); }
+      const v = fitSize(estPrice());
+      if (v) { T.amount = v; amt.value = v; T.error = null; renderReview({ keepScroll: true }); el.querySelector("#t-confirm")?.focus({ preventScroll: true }); }
       return;
     }
-    if (b.id === "t-edit") { T.review = false; renderReview(); return amt.focus({ preventScroll: false }); }
+    if (b.id === "t-edit") { T.review = false; T.requoting = false; renderReview({ keepScroll: true }); return amt.focus(); }
     if (b.id === "t-confirm") return submitTrade();
   };
 }
 
+// One order at a time, across ticket re-opens.
+let inFlight = false;
 async function submitTrade() {
-  if (T.busy) return; // a double tap must never send two orders
-  T.busy = true; T.error = null; renderReview();
+  if (inFlight) return; // a double tap must never send two orders
+  inFlight = true;
+  T.busy = true; T.busyText = "Placing…"; T.error = null; renderReview();
   const body = { symbol: T.symbol, side: T.side, order_type: T.type };
   if (T.size === "notional") body.notional = parseAmount(T.amount); else body.qty = parseAmount(T.amount);
   if (T.type === "limit") body.limit_price = parseAmount(T.limit);
   if (T.note) body.note = T.note;
-  const sentAt = Date.now();
+  const known = S.trades.reduce((m, t) => Math.max(m, Number(t.id) || 0), 0);
   let r;
   try {
     r = await api("/order", { method: "POST", body: JSON.stringify(body), timeout: 30_000 });
     if (!r.body.ok && r.status >= 500 && !r.body.message) throw new Error("The server hit an error.");
   } catch (err) {
-    // We don't know whether the order reached the broker. Don't offer a one-tap retry: look it up first.
-    T.busy = false; T.review = false;
-    T.error = `${err.message} Checking whether the order went through…`;
+    // We don't know whether the order reached the broker. Look for it before allowing another try.
+    T.busyText = "Checking whether it went through…"; renderReview();
+    const hit = await findOrder(body, known);
+    inFlight = false; T.busy = false; T.review = false;
+    T.error = hit === undefined
+      ? `${err.message} Couldn't check whether the order went through. Close this and look at the trade log before trying again.`
+      : hit
+        ? `${err.message} The order did reach the server: it's in your trade log as ${hit.status}. Don't place it again.`
+        : `${err.message} The order isn't in your trade log after 15 seconds, so it wasn't placed. Review it again to retry.`;
     renderReview();
-    await load().catch(() => {});
-    const checked = S.tradesAt >= sentAt;
-    const hit = checked && S.trades.find((t) => t.source === "manual" && t.symbol === body.symbol && t.side === body.side
-      && new Date(t.created_at).getTime() >= sentAt - 5 * 60_000);
-    T.error = hit
-      ? `The connection dropped, but the order reached the server (${hit.status}). It's in your trade log, so don't place it again.`
-      : checked
-        ? `${err.message} The order isn't in your trade log, so it most likely wasn't placed. Review it again to retry.`
-        : `${err.message} Couldn't check whether it went through. Close this and refresh before you try again.`;
-    if (S.sheet === "sheet-trade") renderReview();
+    load().catch(() => {});
     return;
   }
-  T.busy = false;
+  inFlight = false; T.busy = false;
   if (!r.body.ok) { T.error = r.body.message || r.body.error || "Order failed."; return renderReview(); }
   const o = r.body.order;
   closeSheet();
@@ -936,6 +1089,24 @@ async function submitTrade() {
     ? `${o.side === "buy" ? "Bought" : "Sold"} ${shares(Number(o.filled_qty))} ${o.symbol} at ${usd(Number(o.filled_avg_price))}`
     : `${o.side === "buy" ? "Buy" : "Sell"} order for ${o.symbol} placed`);
   await load().catch((e) => toast(e.message, "err"));
+}
+
+// After a dropped connection: poll the trade log for a row newer than anything we'd seen, with this exact order.
+// Returns the row, null if it never appeared, or undefined if the log couldn't be read at all.
+async function findOrder(body, known) {
+  let reached = false;
+  for (const wait of [1500, 4000, 9000]) {
+    await new Promise((res) => setTimeout(res, wait));
+    try {
+      const r = await api("/trades?limit=15", { timeout: 8000 });
+      if (r.status !== 200) continue;
+      reached = true;
+      const hit = (r.body.trades ?? []).find((t) => Number(t.id) > known && t.source === "manual" && t.symbol === body.symbol && t.side === body.side
+        && (body.notional != null ? Math.abs(Number(t.notional) - body.notional) < 0.005 : Math.abs(Number(t.qty) - body.qty) < 1e-6));
+      if (hit) return hit;
+    } catch { /* still offline; try again */ }
+  }
+  return reached ? null : undefined;
 }
 
 /* limits & account */
@@ -990,12 +1161,15 @@ let loadSeq = 0;
 async function load() {
   const seq = ++loadSeq;
   const soft = (pr) => pr.catch(() => null);
+  // Only the visible period and the all-time series stay cached; others refetch when opened, so they're never days old.
+  for (const k of Object.keys(S.history)) if (k !== S.period && k !== "all") delete S.history[k];
   const [p, t, n] = await Promise.all([
     api("/portfolio"), soft(api("/trades?limit=40")), soft(api("/notes?limit=20")),
     soft(loadHistory(S.period)), soft(loadHistory("all")),
   ]);
   if (seq !== loadSeq) return;
   if (p.status !== 200) throw new Error(p.body.error || "Could not load the portfolio.");
+  if (!p.body?.account || !Array.isArray(p.body.positions) || !p.body.market) throw new Error("The server sent an incomplete portfolio.");
   S.data = p.body;
   if (t?.status === 200) { S.trades = t.body.trades ?? []; S.tradesAt = Date.now(); }
   if (n?.status === 200) S.notes = n.body.notes ?? [];
@@ -1012,7 +1186,7 @@ function wireMain() {
     if (b.id === "refresh") {
       if (b.classList.contains("spin")) return;
       b.classList.add("spin");
-      try { await load(); toast("Up to date"); } catch (err) { toast(err.message, "err"); }
+      try { await load(); toast("Up to date"); } catch (err) { markStale(); toast(err.message, "err"); }
       document.getElementById("refresh")?.classList.remove("spin");
       return;
     }
@@ -1028,12 +1202,20 @@ function wireMain() {
       return;
     }
     if (b.dataset.period) {
-      if (b.dataset.period === S.period) return;
+      const want = b.dataset.period;
+      if (want === S.period) return;
       const prev = S.period;
-      S.period = b.dataset.period;
-      if (!S.history[S.period]) {
-        try { await loadHistory(S.period); } catch (err) { S.period = prev; toast(err.message, "err"); return; }
+      S.period = want;
+      // Move the tab right away; the chart follows when its data lands.
+      main.querySelectorAll("[data-period]").forEach((x) => x.setAttribute("aria-pressed", x.dataset.period === want));
+      slideTabs();
+      if (!S.history[want]) {
+        try { await loadHistory(want); } catch (err) {
+          if (S.period === want) { S.period = prev; renderMain(true); toast(err.message, "err"); }
+          return;
+        }
       }
+      if (S.period !== want) return; // another tab was picked meanwhile
       S.animateChart = true;
       return renderMain();
     }
@@ -1058,7 +1240,7 @@ function wireMain() {
     }
   });
   let resizeTimer;
-  addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(mountChart, 120); });
+  addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { mountChart(); slideTabs(); }, 120); });
   // Remember the last touch, scroll or key, so a quiet refresh never rebuilds the page under a finger.
   const touch = () => (S.lastInput = Date.now());
   ["pointerdown", "keydown", "wheel", "scroll", "touchmove"].forEach((t) => addEventListener(t, touch, { passive: true, capture: true }));
@@ -1069,7 +1251,7 @@ function wireMain() {
   const quiet = (force = false) => {
     if (S.expired || document.hidden || S.sheet || S.scrubbing || !S.data) return;
     if (!force && Date.now() - S.lastInput < 10_000) return;
-    load().catch(() => {});
+    load().catch((e) => { if (!S.expired) markStale(); });
   };
   // Every minute while the market is open (or should have just opened).
   setInterval(() => { if (due()) quiet(); }, 60_000);
@@ -1093,7 +1275,7 @@ async function boot() {
   if (!session) return renderGate();
   S.login = String(session.user.user_metadata?.user_name ?? "").toLowerCase();
   if (S.login !== ALLOWED_GITHUB_LOGIN.toLowerCase()) {
-    await sb.auth.signOut();
+    await sb.auth.signOut().catch(() => {});
     return renderGate(`The GitHub account "${S.login}" doesn't have access.`);
   }
   mountShell();
@@ -1108,4 +1290,7 @@ async function boot() {
     main.querySelector("#retry").onclick = () => location.reload();
   }
 }
-boot();
+boot().catch((err) => {
+  root.innerHTML = `<div class="skeleton" style="text-transform:none;letter-spacing:0;font:14px var(--sans);gap:14px"><span role="alert">${esc(err?.message || "Something went wrong.")}</span><button class="chip flat" style="border:0" id="retry">Reload</button></div>`;
+  root.querySelector("#retry").onclick = () => location.reload();
+});
