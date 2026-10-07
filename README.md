@@ -29,7 +29,7 @@ order, max 10 orders/day, optional `SYMBOL_ALLOWLIST`, mandatory `reason`. Every
 2. Supabase → Authentication → URL Configuration: Site URL `https://portfolio.oliverseydlitz.com`, add redirect URL `https://portfolio.oliverseydlitz.com/**`.
 3. Supabase → Authentication → OAuth Server: enable, authorization path `/oauth/consent`, enable dynamic client registration.
 4. Supabase → Edge Functions → Secrets: `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` (paper keys). Optional: `ALLOWED_GITHUB_LOGIN`, `MAX_ORDER_PCT`, `MAX_POSITION_PCT`, `MAX_ORDERS_PER_DAY`, `SYMBOL_ALLOWLIST`.
-5. GitHub → Settings → Pages: Source = GitHub Actions; custom domain `portfolio.oliverseydlitz.com`.
+5. GitHub → Settings → Pages: Source = Deploy from a branch → `gh-pages` / (root) (the workflow publishes `site/` there); custom domain `portfolio.oliverseydlitz.com`.
 6. Cloudflare DNS: CNAME `portfolio` → `oliverseydlitz-ai.github.io`, proxy status DNS only.
 7. claude.ai → Settings → Connectors → Add custom connector → the MCP URL above.
 
