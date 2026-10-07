@@ -114,6 +114,7 @@ const S = {
   prev: null,        // last rendered values, for the tick flash on refresh
   prevPeriod: null,  // for the sliding period indicator
   open: new Set(),   // feed items the user expanded; survives refreshes
+  feedShow: { journal: 5, trades: 8 },
   lastInput: 0,      // last touch/scroll/key, so auto-refresh never yanks the page mid-gesture
   tapeT0: null,      // ticker start time, so re-renders continue the scroll instead of restarting it
   tapePaused: false,
@@ -130,8 +131,12 @@ const timeoutSignal = (ms) => {
   return c.signal;
 };
 async function api(path, { timeout = 20_000, ...opts } = {}) {
-  const { data: { session } } = await sb.auth.getSession();
-  if (!session) { expire(); throw new Error("Signed out."); }
+  const { data: { session }, error: authErr } = await sb.auth.getSession();
+  if (!session) {
+    // A token refresh that failed for network reasons is not an expired session.
+    if (authErr?.name === "AuthRetryableFetchError") throw new Error("Network error. Check your connection.");
+    expire(); throw new Error("Signed out.");
+  }
   const lost = (e) => new Error(e?.name === "TimeoutError" || e?.name === "AbortError" ? "The server took too long to answer." : "Network error. Check your connection.");
   let res, body;
   try {
@@ -211,6 +216,12 @@ function mountShell() {
   vv?.addEventListener("scroll", fit);
 }
 
+const announce = (msg, assertive = false) => {
+  const live = document.getElementById(assertive ? "live-alert" : "live-polite");
+  if (!live) return;
+  live.textContent = "";
+  setTimeout(() => (live.textContent = msg), 60);
+};
 let toastTimer;
 function toast(msg, kind = "ok") {
   const t = document.getElementById("toast");
@@ -218,9 +229,7 @@ function toast(msg, kind = "ok") {
   t.innerHTML = `<span class="toast-i ${kind}">${kind === "ok" ? I.check : I.warn}</span><span>${esc(msg)}</span>`;
   t.classList.add("on");
   // Announce through regions that always exist; the visual toast itself stays out of the accessibility tree.
-  const live = document.getElementById(kind === "err" ? "live-alert" : "live-polite");
-  live.textContent = "";
-  setTimeout(() => (live.textContent = msg), 60);
+  announce(msg, kind === "err");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove("on"), kind === "err" ? 5000 : 3200);
 }
@@ -276,9 +285,9 @@ function scoreHtml() {
   const ahead = p.slice(1).filter((q) => q.portfolio > q.spy).length;
   const verdict = lead === 0 ? "<strong>Dead even.</strong>"
     : lead > 0 ? `<strong>Claude leads</strong> by ${pts(lead).slice(1)}` : `<strong>SPY leads</strong> by ${pts(-lead).slice(1)}`;
-  return `<section class="card score"><div class="card-h"><h2>The race</h2><span class="aside">since ${esc(fmtDay(p[0].date))}</span></div>
+  return `<section class="card score"><div class="card-h"><h2>The race</h2><span class="aside">since ${esc(fmtDay(p[0].date, p[0].date.slice(0, 4) !== end.date.slice(0, 4)))}</span></div>
     <div class="vs">
-      <div class="side"><div class="who"><i></i>Claude</div><div class="ret num">${pct(c)}</div></div>
+      <div class="side"><div class="who"><i></i>Claude</div><div class="ret num ${tone(c) === "loss" ? "loss" : ""}">${pct(c)}</div></div>
       <div class="vs-mid">vs</div>
       <div class="side spy"><div class="who"><i></i>SPY</div><div class="ret num">${pct(s)}</div></div>
     </div>
@@ -302,7 +311,7 @@ function chartCardHtml() {
       <span class="when" id="ro-w"></span>
     </div>
     ${body}
-    <div class="tabs" role="group" aria-label="Period"><span class="tab-ind" aria-hidden="true"></span>${periods.map(([k, l, full]) => `<button data-period="${k}" aria-pressed="${k === S.period}" aria-label="${full}">${l}</button>`).join("")}</div>
+    <div class="tabs" role="group" aria-label="Period"><span class="tab-ind" aria-hidden="true"></span>${periods.map(([k, l, full]) => `<button data-period="${k}" aria-pressed="${k === S.period}" aria-label="${l} (${full})">${l}</button>`).join("")}</div>
   </section>`;
 }
 
@@ -310,7 +319,7 @@ const ALLOC_COLOR = { Stocks: "var(--cat-1)", ETFs: "var(--cat-2)", "Bond ETFs":
 function allocationHtml(d) {
   const color = (a) => ALLOC_COLOR[a.label] ?? "var(--ctl)";
   const total = d.allocation.reduce((s, a) => s + a.value, 0) || 1;
-  return `<section class="card"><div class="card-h"><h2>Allocation</h2><span class="aside">${d.positions.length} position${d.positions.length === 1 ? "" : "s"}</span></div>
+  return `<section class="card alloc-card"><div class="card-h"><h2>Allocation</h2><span class="aside">${d.positions.length} position${d.positions.length === 1 ? "" : "s"}</span></div>
     <div class="alloc-bar" role="img" aria-label="${esc(d.allocation.map((a) => `${a.label} ${((a.value / total) * 100).toFixed(1)}%`).join(", "))}">
       ${d.allocation.map((a, i) => (a.value > 0.5 ? `<i style="flex:${a.value};background:${color(a)};animation-delay:${i * 80}ms"></i>` : "")).join("")}
     </div>
@@ -327,7 +336,7 @@ function performanceHtml(d) {
   const cap = ref > 0 && nz[0] > 3 * ref ? ref * 3 : (nz[0] ?? 0);
   const max = Math.max(0.5, cap);
   const fill = { gain: "var(--gain)", loss: "var(--loss)", flat: "var(--mute)" };
-  return `<section class="card"><div class="card-h"><h2>Best to worst</h2><span class="aside">return since entry</span></div>
+  return `<section class="card perf-card"><div class="card-h"><h2>Best to worst</h2><span class="aside">return since entry</span></div>
     <div class="perf">${rows.map((r, i) => {
       const v = r.unrealized_pl_pct, t = tone(v), neg = t === "loss", clip = Math.abs(v) > max;
       const w = t === "flat" ? 0 : Math.max((Math.min(Math.abs(v), max) / max) * 50, 1.2);
@@ -343,7 +352,7 @@ const CAT_COLOR = { Stock: "var(--cat-1)", ETF: "var(--cat-2)", "Bond ETF": "var
 function holdingsHtml(d) {
   const rows = [...d.positions].sort((a, b) => b.market_value - a.market_value);
   const dot = `<i class="dot" aria-hidden="true"></i>`;
-  return `<section class="card"><div class="card-h"><h2>Holdings</h2><span class="aside">${finePointer ? "click" : "tap"} a row to trade</span></div>
+  return `<section class="card holdings-card"><div class="card-h"><h2>Holdings</h2><span class="aside">${finePointer ? "click" : "tap"} a row to trade</span></div>
     ${rows.length ? `<div class="holdings"><div class="h-head" aria-hidden="true"><span>Position</span><span>Value · total return</span></div>${rows.map((p) => `<button class="h-row" data-sym="${esc(p.symbol)}">
       <span class="h-main">
         <span class="h-sym"><b><span class="sr">Trade </span>${esc(p.symbol)}</b><span>${esc(cleanName(p.name))}</span></span>
@@ -359,7 +368,7 @@ function holdingsHtml(d) {
 
 function openOrdersHtml(d) {
   if (!d.open_orders.length) return "";
-  return `<section class="card"><div class="card-h"><h2>Working orders</h2><span class="aside">${d.open_orders.length}</span></div>
+  return `<section class="card orders-card"><div class="card-h"><h2>Working orders</h2><span class="aside">${d.open_orders.length}</span></div>
     ${d.open_orders.map((o) => `<div class="order"><span><b>${esc(String(o.side).toUpperCase())} ${esc(o.symbol)}</b> <span class="mute">${o.qty ? `${shares(Number(o.qty))} sh` : usd(Number(o.notional))} · ${esc(o.type)}${o.limit_price ? ` @ ${usd(Number(o.limit_price))}` : ""}</span></span>
       <button class="chip flat" style="border:0" data-cancel="${esc(o.id)}" aria-label="Cancel ${esc(o.side)} order for ${esc(o.symbol)}">Cancel</button></div>`).join("")}
   </section>`;
@@ -401,21 +410,24 @@ function noteEvent(n) {
 
 function feedHtml() {
   const tab = S.feed ?? (S.notes.length ? "journal" : "trades");
-  const grouped = (items, render) => {
-    const out = [];
-    let last = null;
+  // The newest few entries, with older ones a tap away, so the feed never dwarfs the rest of the page.
+  const grouped = (all, render) => {
+    const items = all.slice(0, S.feedShow[tab]), out = [];
+    let prev = null;
     for (const it of items) {
       const label = dayLabel(it.created_at);
-      if (label !== last) { if (last !== null) out.push("</div>"); out.push(`<div class="day"><div class="day-h">${esc(label)}</div>`); last = label; }
+      if (label !== prev) { if (prev !== null) out.push("</div>"); out.push(`<div class="day"><div class="day-h">${esc(label)}</div>`); prev = label; }
       out.push(render(it));
     }
-    if (last !== null) out.push("</div>");
+    if (prev !== null) out.push("</div>");
+    const rest = all.length - items.length;
+    if (rest > 0) out.push(`<button class="feed-more" data-feedmore="${tab}">Show ${Math.min(rest, 10)} older ${tab === "journal" ? "note" : "trade"}${Math.min(rest, 10) === 1 ? "" : "s"}</button>`);
     return out.join("");
   };
   const list = tab === "journal"
     ? (S.notes.length ? grouped(S.notes, noteEvent) : `<p class="empty">Claude hasn't written a note yet. Each scheduled run ends with one.</p>`)
     : (S.trades.length ? grouped(S.trades, tradeEvent) : `<p class="empty">${S.tradesAt ? "No trades yet." : "Couldn't load the trade log. Refresh to try again."}</p>`);
-  return `<section class="card"><div class="card-h" style="align-items:center"><h2>${tab === "journal" ? "Claude's journal" : "Trade log"}</h2>
+  return `<section class="card feed-card"><div class="card-h" style="align-items:center"><h2>${tab === "journal" ? "Claude's journal" : "Trade log"}</h2>
       <div class="seg" role="group" aria-label="Feed"><button data-feed="journal" aria-pressed="${tab === "journal"}">Journal</button><button data-feed="trades" aria-pressed="${tab === "trades"}">Trades</button></div></div>
     <div class="feed">${list}</div></section>`;
 }
@@ -424,7 +436,7 @@ function feedHtml() {
 function focusKey(el) {
   if (!el || el === document.body) return null;
   if (el.id) return `#${CSS.escape(el.id)}`;
-  for (const a of ["data-sym", "data-period", "data-feed", "data-cancel", "data-more"]) {
+  for (const a of ["data-sym", "data-period", "data-feed", "data-cancel", "data-more", "data-feedmore"]) {
     if (el.hasAttribute?.(a)) return `[${a}="${CSS.escape(el.getAttribute(a))}"]`;
   }
   return null;
@@ -435,7 +447,7 @@ let lastRender = "";
 function renderMain(force = false) {
   const d = S.data;
   // A quiet refresh that brought nothing new leaves the page (and a screen reader's place in it) alone.
-  const sig = JSON.stringify([d, S.trades, S.notes, S.history[S.period], S.history.all, S.period, S.feed]);
+  const sig = JSON.stringify([d, S.trades, S.notes, S.history[S.period], S.history.all, S.period, S.feed, S.feedShow]);
   if (!force && sig === lastRender) { markFresh(); return; }
   lastRender = sig;
   S.stale = false;
@@ -538,7 +550,7 @@ function mountChart() {
   const n = points.length, endP = last(points).portfolio - 100, endS = last(points).spy - 100;
   const W = el.clientWidth, H = el.clientHeight, padT = 12, padB = 28, padL = 18;
   // Both end tags share one precision and keep their "%"; the right gutter fits the wider one.
-  const tagDec = Math.max(Math.abs(endP), Math.abs(endS)) >= 10 ? 1 : 2;
+  const tagDec = 2; // same precision as the race card, so one number never reads two ways
   const tagP = pct(endP, tagDec), tagS = pct(endS, tagDec);
   const tagW = Math.ceil(Math.max(tagP.length, tagS.length) * 6.7 + 12), padR = tagW + 8;
 
@@ -744,7 +756,8 @@ function enableSwipe(sheet) {
   }));
 }
 function closeSheet(fromHistory = false) {
-  if (!S.sheet || !canClose()) return;
+  if (!S.sheet) return;
+  if (!canClose()) return toast("Still placing your order. This closes once it's confirmed.", "info");
   document.removeEventListener("keydown", trapTab);
   if (!fromHistory && history.state?.sheet) history.back();
   document.getElementById(S.sheet).classList.remove("on");
@@ -785,6 +798,8 @@ function openTrade(symbol = "") {
   openSheet("sheet-trade", symbol ? "#t-amt" : "#t-sym");
   refreshTicket();
   if (symbol) fetchQuote();
+  // The limit checks use the last snapshot: refresh it if it's more than half a minute old.
+  if (Date.now() - (S.updatedAt ?? 0) > 30_000) load().then(() => { if (S.sheet === "sheet-trade" && !T.busy) refreshTicket(); }, () => {});
 }
 // The ticket is locked while an order is in flight; asking for a new one just brings that one back.
 function reopenInFlight() {
@@ -816,7 +831,8 @@ function buyRoom() {
 function sellable() {
   const p = position(T.symbol);
   if (!p) return 0;
-  const earmarked = S.data.open_orders.filter((o) => o.side === "sell" && o.symbol === T.symbol).reduce((s, o) => s + (Number(o.qty) || 0), 0);
+  const earmarked = S.data.open_orders.filter((o) => o.side === "sell" && o.symbol === T.symbol)
+    .reduce((s, o) => s + (Number(o.qty) || 0) - (Number(o.filled_qty) || 0), 0);
   return Math.max(0, p.qty - earmarked);
 }
 // The largest size that fits the binding rule, with a little headroom for the price moving.
@@ -825,7 +841,7 @@ function fitSize(price) {
   if (cap < 1) return null;
   if (T.size === "notional") return String(Math.floor(cap));
   if (!price) return null;
-  const whole = T.type === "limit" || T.quote?.fractionable === false;
+  const whole = T.quote?.fractionable === false;
   const q = whole ? Math.floor(cap / price) : Math.floor((cap / price) * 1e4) / 1e4;
   return q > 0 ? String(q) : null;
 }
@@ -922,12 +938,11 @@ function renderReview({ keepScroll = false } = {}) {
   if (!box) return;
   const hadFocus = box.contains(document.activeElement) ? document.activeElement.id : null;
   const err = T.error ? alertHtml(T.error) : "";
-  if (T.busy) {
-    box.innerHTML = `${err}<div class="actions"><button class="btn ${T.side}" id="t-wait" aria-disabled="true" aria-live="polite">${esc(T.busyText || "Placing…")}</button></div>`;
-    if (hadFocus) box.querySelector("#t-wait").focus();
+  if (!T.busy && !marketOpenNow()) {
+    box.innerHTML = `<div class="actions"><button class="btn blocked" id="t-go" disabled>Market closed</button></div>`;
     return;
   }
-  if (!T.review) {
+  if (!T.review && !T.busy) {
     box.innerHTML = `${err}<div class="actions"><button class="btn" id="t-go">Review order</button></div>`;
     if (T.error && !keepScroll) scrollSheetEnd();
     if (hadFocus) box.querySelector("#t-go").focus({ preventScroll: true });
@@ -941,27 +956,37 @@ function renderReview({ keepScroll = false } = {}) {
   const over = room && value != null && value > room.cap + 0.01;
   const fit = over ? fitSize(price) : null;
   const fitLabel = fit ? (T.size === "notional" ? usd(Number(fit), 0) : `${shares(Number(fit))} sh`) : "";
+  // A share-sized market order can't be checked against the limits without a price.
+  const noPrice = !T.requoting && T.size === "qty" && T.type === "market" && !price;
   const warn = over
     ? `<div class="alert err" role="alert"><b>Too big for ${esc(room.rule)}.</b> ${room.pct != null
         ? room.rule === "your max position"
           ? `Positions cap at ${esc(room.pct)}% of equity, which leaves ${usd(Math.max(0, room.cap), 0)} of room in ${esc(T.symbol)}.`
           : `That's ${pctEq.toFixed(1)}% of equity; the cap is ${esc(room.pct)}% (${usd(room.cap, 0)}).`
-        : `You have ${usd(Math.max(0, room.cap), 0)} to spend.`}</div>` : "";
-  box.innerHTML = `<div class="review"><dl>
+        : `You have ${usd(Math.max(0, room.cap), 0)} to spend.`}${!fit && price ? ` One share costs ${usd(price)}.` : ""}</div>`
+    : noPrice ? `<div class="alert err" role="alert"><b>No price for ${esc(T.symbol)}.</b> Without one the order can't be checked against your limits.</div>` : "";
+  const summary = `<div class="review${T.busy ? " dim" : ""}"><dl>
       <dt>Order</dt><dd>${T.side === "buy" ? "Buy" : "Sell"} <span class="mono">${esc(T.symbol)}</span></dd>
       <dt>Size</dt><dd>${T.size === "notional" ? usd(amt) : `${shares(amt)} sh`}</dd>
       <dt>${T.type === "limit" ? "Limit" : "Est. price"}</dt><dd>${T.requoting ? `<span class="mute">updating…</span>` : price ? usd(price) : "–"}</dd>
       <dt>Est. value</dt><dd>${value != null ? usd(value) : "–"}${pctEq != null ? ` <span class="mute">· ${pctEq.toFixed(1)}% of equity</span>` : ""}</dd>
       <dt>Type</dt><dd>${T.type === "limit" ? "Limit" : "Market"} · day · paper</dd>
-    </dl></div>${warn}${err}
-    <div class="actions">${over
-      ? (fit ? `<button class="btn" id="t-fit">Size it down to ${fitLabel}</button>` : `<button class="btn blocked" id="t-confirm" disabled>No room left</button>`)
-      : `<button class="btn ${T.side === "buy" ? "buy" : "sell"}" id="t-confirm" ${T.requoting ? "disabled" : ""}>${T.requoting ? "Updating price…" : `Confirm ${T.side} · ${esc(T.symbol)}`}</button>`}
-      <button class="btn ghost" id="t-edit">Edit</button>
-    </div>`;
+    </dl></div>`;
+  if (T.busy) {
+    // The summary stays in view while we wait; the status is announced through the persistent live region.
+    box.innerHTML = `${summary}${err}<div class="actions"><button class="btn ${T.side === "buy" ? "buy" : "sell"}" id="t-wait" aria-disabled="true">${esc(T.busyText || "Placing…")}</button></div>`;
+    announce(T.busyText || "Placing order");
+    if (hadFocus) box.querySelector("#t-wait").focus({ preventScroll: true });
+    return;
+  }
+  const primary = over
+    ? fit ? `<button class="btn" id="t-fit">Size it down to ${fitLabel}</button>` : `<button class="btn blocked" id="t-confirm" disabled>Doesn't fit your limits</button>`
+    : noPrice ? `<button class="btn" id="t-requote">Try the price again</button>`
+    : `<button class="btn ${T.side === "buy" ? "buy" : "sell"}" id="t-confirm" ${T.requoting ? "disabled" : ""}>${T.requoting ? "Updating price…" : `Confirm ${T.side} · ${esc(T.symbol)}`}</button>`;
+  box.innerHTML = `${summary}${warn}${err}<div class="actions">${primary}<button class="btn ghost" id="t-edit">Edit</button></div>`;
   if (!keepScroll) scrollSheetEnd();
   // Keep a keyboard user's place when the buttons are rebuilt.
-  if (hadFocus) (box.querySelector(`#${hadFocus}`) ?? box.querySelector("#t-confirm:not(:disabled), #t-fit, #t-edit"))?.focus({ preventScroll: true });
+  if (hadFocus) (box.querySelector(`#${hadFocus}`) ?? box.querySelector("#t-confirm:not(:disabled), #t-fit, #t-requote, #t-edit"))?.focus({ preventScroll: true });
 }
 // The review, any warning and the buttons sit at the end of the ticket: bring all of them into view together.
 function scrollSheetEnd() {
@@ -986,6 +1011,11 @@ function wireTrade(el) {
     if (T.review || T.error) { T.review = false; T.error = null; renderReview({ keepScroll: true }); }
   });
   num(amt, "amount"); num(lim, "limit");
+  // Echo typed amounts back with thousands separators ("20000" → "20,000") once the field is left.
+  [[amt, "amount"], [lim, "limit"]].forEach(([inp, key]) => inp.addEventListener("blur", () => {
+    const v = parseAmount(inp.value);
+    if (Number.isFinite(v) && v > 0) { inp.value = v.toLocaleString("en-US", { maximumFractionDigits: key === "limit" || T.size === "notional" ? 2 : 6 }); T[key] = inp.value; }
+  }));
   note.addEventListener("input", () => (T.note = note.value));
   // Enter in any field goes to Review (never straight to Confirm).
   el.querySelectorAll("input").forEach((inp) => inp.addEventListener("keydown", (e) => {
@@ -1046,6 +1076,7 @@ function wireTrade(el) {
       if (v) { T.amount = v; amt.value = v; T.error = null; renderReview({ keepScroll: true }); el.querySelector("#t-confirm")?.focus({ preventScroll: true }); }
       return;
     }
+    if (b.id === "t-requote") { T.requoting = true; renderReview({ keepScroll: true }); return fetchQuote(true); }
     if (b.id === "t-edit") { T.review = false; T.requoting = false; renderReview({ keepScroll: true }); return amt.focus(); }
     if (b.id === "t-confirm") return submitTrade();
   };
@@ -1061,34 +1092,48 @@ async function submitTrade() {
   if (T.size === "notional") body.notional = parseAmount(T.amount); else body.qty = parseAmount(T.amount);
   if (T.type === "limit") body.limit_price = parseAmount(T.limit);
   if (T.note) body.note = T.note;
-  // The newest trade-log id before sending: anything above it with this exact order is ours.
-  let known = S.tradesAt ? S.trades.reduce((m, t) => Math.max(m, Number(t.id) || 0), 0) : null;
+  // The newest trade-log id right before sending: anything above it with this exact order is ours.
+  // If even this read fails, the order would almost certainly fail too, so it isn't sent.
+  let known = null;
+  try {
+    const t = await api("/trades?limit=5", { timeout: 8000 });
+    if (t.status === 200) known = (t.body.trades ?? []).reduce((m, x) => Math.max(m, Number(x.id) || 0), 0);
+  } catch { /* handled below */ }
   if (known == null) {
-    try {
-      const t = await api("/trades?limit=5", { timeout: 6000 });
-      if (t.status === 200) known = (t.body.trades ?? []).reduce((m, x) => Math.max(m, Number(x.id) || 0), 0);
-    } catch { /* leave unknown */ }
+    inFlight = false; T.busy = false; T.review = false;
+    T.error = "Can't reach the server right now, so the order wasn't sent. Check your connection and try again.";
+    return renderReview();
   }
   let r;
   try {
     r = await api("/order", { method: "POST", body: JSON.stringify(body), timeout: 30_000 });
-    if (!r.body.ok && r.status >= 500 && !r.body.message) throw new Error("The server hit an error.");
   } catch (err) {
     // We don't know whether the order reached the broker. Look for it before allowing another try.
     T.busyText = "Checking whether it went through…"; renderReview();
-    const hit = known == null ? undefined : await findOrder(body, known);
+    const hit = await findOrder(body, known);
     inFlight = false; T.busy = false; T.review = false;
     T.error = hit === undefined
       ? `${err.message} Couldn't check whether the order went through. Close this and look at the trade log before trying again.`
-      : hit
-        ? `${err.message} The order did reach the server: it's in your trade log as ${hit.status}. Don't place it again.`
-        : `${err.message} The order isn't in your trade log after 15 seconds, so it wasn't placed. Review it again to retry.`;
+      : hit && (hit.status === "accepted" || hit.status === "pending")
+        ? `${err.message} The order did reach the broker: it's in your trade log as ${hit.status}. Don't place it again.`
+        : hit
+          ? `${err.message} The server logged it as ${hit.status}${hit.error ? ` (${explain(hit.error).detail})` : ""}, so it wasn't placed.`
+          : `${err.message} It hasn't appeared in your trade log after 15 seconds, so it probably wasn't placed. Check Working orders and the log before you retry.`;
     renderReview();
     load().catch(() => {});
     return;
   }
   inFlight = false; T.busy = false;
-  if (!r.body.ok) { T.error = r.body.message || r.body.error || "Order failed."; return renderReview(); }
+  if (!r.body.ok) {
+    // The server knows something our snapshot didn't: refresh it, then make the user review again.
+    // A 5xx is never a clean "no": the broker may have taken the order before something else failed.
+    T.error = r.status >= 500
+      ? `${r.body.message || "The server hit an error."} The order may still have gone through: check Working orders and your holdings before retrying.`
+      : r.body.message || r.body.error || "Order failed.";
+    T.review = false;
+    renderReview();
+    return load().then(() => { if (S.sheet === "sheet-trade" && !T.busy) refreshTicket(); }, () => {});
+  }
   const o = r.body.order;
   closeSheet();
   navigator.vibrate?.(12);
@@ -1136,7 +1181,7 @@ function openLimits() {
     <div class="who-line"><span>Signed in as <b style="color:var(--ink);font-weight:500">${esc(S.login)}</b></span><button class="chip flat" style="border:0" id="logout">Sign out</button></div>`;
   openSheet("sheet-limits", "#l1");
   el.querySelector("[data-close]").onclick = closeSheet;
-  el.querySelector("#logout").onclick = async () => { await sb.auth.signOut().catch(() => {}); location.reload(); };
+  el.querySelector("#logout").onclick = async () => { await sb.auth.signOut({ scope: "local" }).catch(() => {}); location.reload(); };
   el.querySelector("#l-form").onsubmit = async (e) => {
     e.preventDefault();
     const save = el.querySelector("#l-save"), msg = el.querySelector("#l-msg");
@@ -1218,7 +1263,12 @@ function wireMain() {
       slideTabs();
       if (!S.history[want]) {
         try { await loadHistory(want); } catch (err) {
-          if (S.period === want) { S.period = prev; renderMain(true); toast(err.message, "err"); }
+          if (S.period === want) {
+            S.period = prev;
+            if (!S.history[prev]) await loadHistory(prev).catch(() => {}); // a refresh may have evicted it meanwhile
+            if (S.period === prev) renderMain(true);
+            toast(err.message, "err");
+          }
           return;
         }
       }
@@ -1227,6 +1277,7 @@ function wireMain() {
       return renderMain();
     }
     if (b.dataset.feed) { S.feed = b.dataset.feed; return renderMain(); }
+    if (b.dataset.feedmore) { S.feedShow[b.dataset.feedmore] += 10; return renderMain(true); }
     if (b.dataset.sym) return openTrade(b.dataset.sym);
     if (b.dataset.more) {
       const k = b.dataset.more, open = !S.open.has(k);
@@ -1278,11 +1329,12 @@ function skeletonHtml() {
 
 /* ---------- boot ---------- */
 async function boot() {
-  const { data: { session } } = await sb.auth.getSession();
+  const { data: { session }, error } = await sb.auth.getSession();
+  if (!session && error?.name === "AuthRetryableFetchError") throw new Error("Can't reach the sign-in service. Check your connection.");
   if (!session) return renderGate();
   S.login = String(session.user.user_metadata?.user_name ?? "").toLowerCase();
   if (S.login !== ALLOWED_GITHUB_LOGIN.toLowerCase()) {
-    await sb.auth.signOut().catch(() => {});
+    await sb.auth.signOut({ scope: "local" }).catch(() => {});
     return renderGate(`The GitHub account "${S.login}" doesn't have access.`);
   }
   if (history.state?.sheet) history.replaceState(null, ""); // a reload never starts inside a sheet's history entry

@@ -21,9 +21,9 @@
   --loss-soft: rgba(255, 117, 102, 0.13);
   --on-gain: #06170e;
   --on-loss: #1d0705;
-  --cat-1: #c2841a;           /* stocks  } validated categorical set */
-  --cat-2: #3d88e0;           /* ETFs    } (dataviz validator, dark) */
-  --cat-3: #1fa37a;           /* bonds   } */
+  --cat-1: #3d88e0;           /* stocks  } kept off Claude's amber and the gain/loss hues; */
+  --cat-2: #c8579a;           /* ETFs    } distinct under deuteranopia, protanopia and */
+  --cat-3: #62c7d2;           /* bonds   } tritanopia simulation (min dE 18) */
   --cat-cash: #64625a;
   --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 24px 48px -24px rgba(0, 0, 0, 0.6);
   --scrim: rgba(5, 5, 4, 0.62);
@@ -58,9 +58,9 @@
     --loss-soft: rgba(179, 50, 38, 0.09);
     --on-gain: #fffdf8;
     --on-loss: #fffdf8;
-    --cat-1: #a86e0b;
-    --cat-2: #2a78d6;
-    --cat-3: #14936a;
+    --cat-1: #1f5fbf;
+    --cat-2: #b84685;
+    --cat-3: #2793a3;
     --cat-cash: #949086;
     --shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 18px 40px -28px rgba(60, 45, 10, 0.35);
     --scrim: rgba(30, 26, 18, 0.38);
@@ -172,7 +172,7 @@ button { cursor: pointer; }
 @media (min-width: 920px) { .status .cd { display: inline; } }
 .status.stale { color: var(--loss); border-color: color-mix(in srgb, var(--loss) 40%, transparent); }
 .status.stale i { background: var(--loss); animation: none; }
-.status.open i { background: var(--gain); box-shadow: 0 0 0 0 var(--gain); animation: pulse 2.4s var(--ease) infinite; }
+.status.open i { background: var(--gain); box-shadow: 0 0 0 0 var(--gain); animation: pulse 2.4s var(--ease) 5; } /* a few beats, then still */
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--gain) 60%, transparent); } 70%, 100% { box-shadow: 0 0 0 7px transparent; } }
 .icon-btn {
   display: grid;
@@ -302,6 +302,13 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 }
 .grid { display: grid; gap: 14px; }
 .col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+/* Phone: one column in priority order: the chart, anything waiting on you, what you hold, what Claude is thinking. */
+@media (max-width: 919px) {
+  .grid { display: flex; flex-direction: column; }
+  .col { display: contents; }
+  .chart-card { order: 1; } .orders-card { order: 2; } .holdings-card { order: 3; }
+  .feed-card { order: 4; } .alloc-card { order: 5; } .perf-card { order: 6; }
+}
 @media (min-width: 920px) {
   :root { --gutter: 28px; }
   .grid { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 18px; }
@@ -341,7 +348,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   letter-spacing: -0.01em;
   color: var(--ink);
 }
-.card-h .aside { font: 500 12px/1.2 var(--sans); color: var(--mute); font-variant-numeric: tabular-nums; text-align: right; }
+.card-h .aside { font: 500 13px/1.2 var(--sans); color: var(--mute); font-variant-numeric: tabular-nums; text-align: right; }
 
 /* Scoreboard: the point of the experiment ---------------------------------- */
 .score { padding: 20px 18px 18px; }
@@ -364,6 +371,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 }
 .side.spy { text-align: right; }
 .side .ret { color: var(--accent-fg); }
+.side .ret.loss { color: var(--loss); } /* a losing Claude still reads as a loss */
 .side.spy .ret { color: var(--ink-2); }
 .side.spy .who { justify-content: flex-end; }
 .vs-mid { padding-bottom: 8px; font: italic 400 20px/1 var(--serif); color: var(--mute); }
@@ -391,13 +399,14 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 .chart-card { padding: 18px 0 12px; }
 .chart-card .card-h, .chart-card .readout, .chart-card .tabs { padding-inline: 18px; }
 .readout { display: flex; gap: 6px 18px; align-items: center; min-height: 22px; flex-wrap: wrap; }
-.readout .k { display: inline-flex; align-items: center; gap: 7px; font: 500 12px/1 var(--sans); color: var(--ink-2); }
+.readout .k { display: inline-flex; align-items: center; gap: 7px; font: 500 13px/1 var(--sans); color: var(--ink-2); }
 .readout .k i { width: 14px; height: 2px; border-radius: 2px; background: var(--accent); }
 .readout .k i.d { background: transparent; border-top: 2px dashed var(--spy); height: 0; }
 .readout .v { font: 500 14px/1 var(--sans); color: var(--ink); font-variant-numeric: tabular-nums; }
 .readout .v:empty { display: none; }
 .readout .k + .k .v { color: var(--ink-2); }
 .readout .when { margin-left: auto; font: 500 11px/1 var(--mono); color: var(--mute); letter-spacing: 0.04em; font-variant-numeric: tabular-nums; }
+@media (max-width: 919px) { .readout .when { flex-basis: 100%; margin-left: 0; } } /* own line: scrubbing never re-wraps the row */
 .plot { position: relative; margin-top: 12px; height: 230px; touch-action: pan-y; user-select: none; -webkit-user-select: none; outline: none; }
 .plot:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); border-radius: 8px; }
 .plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
@@ -434,7 +443,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 .tabs button { position: relative; z-index: 1; }
 .tabs button[aria-pressed="true"] { color: var(--ink); }
 .plot .xl { transition: opacity 0.15s; }
-.plot .halo { transform-box: fill-box; transform-origin: center; animation: halo 2.6s var(--ease) infinite; opacity: 0.5; }
+.plot .halo { transform-box: fill-box; transform-origin: center; animation: halo 2.6s var(--ease) 4 forwards; opacity: 0.5; }
 @keyframes halo { 0% { transform: scale(1); opacity: 0.55; } 80%, 100% { transform: scale(4.2); opacity: 0; } }
 
 /* Allocation --------------------------------------------------------------- */
@@ -493,7 +502,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 .h-sub .dot { width: 2px; height: 2px; border-radius: 50%; background: var(--mute); opacity: 0.7; }
 .h-sub .sh { display: none; }
 @media (min-width: 920px) { .h-sub .sh { display: contents; } }
-.h-pl { text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.h-pl { text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .h-val { border-radius: 6px; padding: 0 3px; margin: 0 -3px; }
 
 .tick-up, .tick-down { border-radius: 8px; }
@@ -525,7 +534,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   border-radius: 8px;
   background: transparent;
   color: var(--mute);
-  font: 500 12px/1 var(--sans);
+  font: 500 13px/1 var(--sans);
   transition: background 0.2s, color 0.2s;
 }
 .seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18); }
@@ -574,6 +583,8 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 .ev-err { margin-top: 6px; font-size: 12px; color: var(--loss); overflow-wrap: anywhere; }
 .more { min-height: 28px; margin-top: 2px; padding: 4px 0; border: 0; background: none; color: var(--accent-fg); font-size: 13px; font-weight: 500; }
 .empty { padding: 18px 0 6px; color: var(--mute); font-size: 13px; }
+.feed-more { width: 100%; height: 40px; margin-top: 4px; border: 1px dashed var(--ctl); border-radius: 12px; background: none; color: var(--ink-2); font: 500 13px/1 var(--sans); }
+@media (hover: hover) { .feed-more:hover { color: var(--ink); border-color: var(--ink-2); } }
 
 .foot {
   margin-top: 30px;
@@ -629,7 +640,8 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   .sheet.on { transform: translateY(50%); opacity: 1; }
 }
 .grab { width: 38px; height: 4px; margin: 0 auto 14px; border-radius: 4px; background: var(--line-2); }
-.sheet-h { position: sticky; top: -10px; z-index: 3; display: flex; align-items: center; justify-content: space-between; margin: 0 -20px 6px; padding: 6px 20px 10px; background: var(--surface); }
+.sheet-h { position: sticky; top: -10px; z-index: 3; display: flex; align-items: center; justify-content: space-between; margin: 0 -20px 6px; padding: 6px 20px 10px; background: var(--surface); box-shadow: 0 1px 0 var(--line); }
+.sheet-h::after { content: ""; position: absolute; left: 0; right: 0; top: 100%; height: 14px; background: linear-gradient(var(--surface), transparent); pointer-events: none; }
 .sheet-h h3 { margin: 0; font: 400 30px/1 var(--serif); letter-spacing: -0.01em; outline: none; }
 .field { margin-top: 14px; }
 .field > label, .lbl { display: block; margin-bottom: 7px; font: 500 11px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--mute); }
@@ -678,8 +690,8 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   color: var(--ink-2);
   font: 500 13px/1 var(--sans);
 }
-.mini-seg button[aria-pressed="true"] { border-color: var(--ink-2); background: var(--surface-2); color: var(--ink); font-weight: 600; }
-.mini-seg button:disabled { opacity: 0.4; cursor: not-allowed; }
+.mini-seg button[aria-pressed="true"] { border-color: var(--ink); background: var(--ink); color: var(--bg); font-weight: 600; }
+.mini-seg button:disabled, .mini-seg button[aria-disabled="true"] { opacity: 0.4; cursor: not-allowed; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .chips button {
   height: 36px;
@@ -728,6 +740,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 }
 .review dl { display: grid; grid-template-columns: auto 1fr; gap: 9px 16px; margin: 0; font-size: 14px; }
 .review dt { color: var(--mute); }
+.review.dim { opacity: 0.6; transition: opacity 0.2s; }
 .review dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }
 .hint { margin-top: 10px; font-size: 12px; line-height: 1.5; color: var(--mute); }
 .alert { margin-top: 14px; padding: 12px 14px; border-radius: 13px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
@@ -760,11 +773,15 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   transition: transform 0.35s var(--ease), opacity 0.3s, visibility 0s 0.35s;
 }
 .toast.on { transform: translate(-50%, 0); opacity: 1; visibility: visible; transition-delay: 0s; }
+/* With a sheet open, toasts drop in from the top so they never cover the sheet's buttons. */
+.sheet.on ~ .toast { top: calc(12px + env(safe-area-inset-top)); bottom: auto; transform: translate(-50%, -20px); }
+.sheet.on ~ .toast.on { transform: translate(-50%, 0); }
 .toast { display: flex; align-items: center; gap: 10px; }
 .toast-i { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 50%; }
 .toast-i svg { width: 12px; height: 12px; }
 .toast-i.ok { background: var(--gain); color: var(--on-gain); }
 .toast-i.err { background: var(--loss); color: var(--on-loss); }
+.toast-i.info { background: var(--mute); color: var(--bg); }
 
 /* Sign-in ------------------------------------------------------------------ */
 .gate {

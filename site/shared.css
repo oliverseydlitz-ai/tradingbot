@@ -47,7 +47,9 @@ button {
 }
 button:active { transform: scale(0.985); }
 button.primary { margin-top: 26px; border-color: var(--ink); background: var(--ink); color: var(--bg); }
-button:disabled { opacity: 0.45; cursor: progress; }
+button:disabled, button[aria-disabled="true"] { opacity: 0.45; cursor: progress; }
+.sr { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+h1:focus { outline: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (hover: hover) { button:not(:disabled):hover { opacity: 0.88; } }
 .err { margin-top: 12px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--loss) 45%, transparent); border-radius: 13px; background: var(--surface); color: var(--loss); }

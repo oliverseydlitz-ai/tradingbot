@@ -19,7 +19,10 @@ if (window.top !== window.self) { document.documentElement.innerHTML = ""; throw
 const app = document.getElementById("app");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const show = (html) => (app.innerHTML = html);
-const fail = (msg) => show(`<h1>Can't continue.</h1><p class="err" role="alert">${esc(msg)}</p>`);
+const fail = (msg) => {
+  show(`<h1 tabindex="-1" id="fail-h">Can't continue.</h1><p class="err" role="alert">${esc(msg)}</p>`);
+  document.getElementById("fail-h").focus();
+};
 
 let createClient, SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, ALLOWED_GITHUB_LOGIN;
 try {
@@ -64,12 +67,18 @@ async function main() {
       ${scopes.length ? `<dt>Scopes</dt><dd>${scopes.map(esc).join(", ")}</dd>` : ""}
     </dl>
     <p class="mut">Only approve if you just added this connector yourself.</p>
-    <button class="primary" id="ok">Approve</button><button id="no">Deny</button>`);
+    <button class="primary" id="ok">Approve</button><button id="no">Deny</button>
+    <p class="sr" id="busy" role="status"></p>`);
   document.title = `Authorize ${data.client.name}`;
 
+  let deciding = false;
   const decide = async (approve) => {
-    app.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    if (deciding) return;
+    deciding = true;
+    // aria-disabled, not disabled: the pressed button keeps focus, and the status line announces progress.
+    app.querySelectorAll("button").forEach((b) => b.setAttribute("aria-disabled", "true"));
     document.getElementById(approve ? "ok" : "no").textContent = approve ? "Approving…" : "Denying…";
+    document.getElementById("busy").textContent = approve ? "Approving the connector…" : "Denying the connector…";
     const fn = approve ? sb.auth.oauth.approveAuthorization : sb.auth.oauth.denyAuthorization;
     const { data: d, error: e } = await fn.call(sb.auth.oauth, authorizationId).catch((err) => ({ error: err }));
     if (e || !d) return fail(e?.message || "Request failed.");
