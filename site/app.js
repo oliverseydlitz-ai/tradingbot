@@ -484,7 +484,7 @@ function niceStep(range) {
 function mountChart() {
   const el = document.getElementById("plot");
   const points = S.history[S.period] ?? [];
-  const range = points.length ? `${fmtDay(points[0].date)} – ${fmtDay(last(points).date)}` : "";
+  const range = points.length >= 2 ? `${fmtDay(points[0].date)} – ${fmtDay(last(points).date)}` : "";
   // Idle, the readout is just the legend; values appear while scrubbing (the line-end tags already show the latest).
   const setReadout = (p, label) => {
     const rp = document.getElementById("ro-p"), rs = document.getElementById("ro-s"), rw = document.getElementById("ro-w");
