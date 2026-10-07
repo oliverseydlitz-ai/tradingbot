@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Asset } from "../src/alpaca";
-import { checkOrder, parseConfig, type GuardContext } from "../src/guardrails";
+import type { Asset } from "../supabase/functions/mcp/alpaca.ts";
+import { checkOrder, parseConfig, type GuardContext } from "../supabase/functions/mcp/guardrails.ts";
 
 const cfg = parseConfig({ MAX_ORDER_PCT: "10", MAX_POSITION_PCT: "20", MAX_ORDERS_PER_DAY: "10", SYMBOL_ALLOWLIST: "" });
 const asset: Asset = { symbol: "SPY", class: "us_equity", status: "active", tradable: true, fractionable: true, shortable: true, exchange: "ARCA", name: "SPDR" };

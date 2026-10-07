@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Authorize connector</title>
+<link rel="stylesheet" href="/shared.css">
+</head>
+<body>
+<main id="app"><p class="mut">Loading…</p></main>
+<script type="module">
+import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, ALLOWED_GITHUB_LOGIN } from "/config.js";
+
+const app = document.getElementById("app");
+const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const show = (html) => (app.innerHTML = html);
+const fail = (msg) => show(`<h1>Can't continue</h1><p class="err">${esc(msg)}</p>`);
+
+const authorizationId = new URLSearchParams(location.search).get("authorization_id");
+
+async function main() {
+  if (!authorizationId) return fail("Missing authorization_id. Start from the connector in claude.ai.");
+
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) {
+    // GitHub login, then Supabase sends us right back to this exact URL (keeps authorization_id).
+    const { error } = await sb.auth.signInWithOAuth({ provider: "github", options: { redirectTo: location.href } });
+    if (error) fail(error.message);
+    return;
+  }
+
+  const login = String(session.user.user_metadata?.user_name ?? "").toLowerCase();
+  if (login !== ALLOWED_GITHUB_LOGIN.toLowerCase()) {
+    await sb.auth.signOut();
+    return fail(`GitHub account "${login}" is not allowed to use this server.`);
+  }
+
+  const { data, error } = await sb.auth.oauth.getAuthorizationDetails(authorizationId);
+  if (error || !data) return fail(error?.message || "Invalid or expired authorization request.");
+  if (!("authorization_id" in data)) { location.replace(data.redirect_url); return; } // already consented
+
+  const scopes = (data.scope || "").split(" ").filter(Boolean);
+  show(`
+    <h1>Allow ${esc(data.client.name)} to trade your paper account?</h1>
+    <p class="mut">Signed in as <strong>${esc(login)}</strong>.</p>
+    <dl>
+      <dt>App</dt><dd>${esc(data.client.name)}</dd>
+      <dt>Sends access to</dt><dd>${esc(data.redirect_uri)}</dd>
+      ${scopes.length ? `<dt>Scopes</dt><dd>${scopes.map(esc).join(", ")}</dd>` : ""}
+    </dl>
+    <p class="mut">Only approve if you just added this connector yourself.</p>
+    <button class="primary" id="ok">Approve</button><button id="no">Deny</button>`);
+
+  const decide = async (approve) => {
+    app.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    const fn = approve ? sb.auth.oauth.approveAuthorization : sb.auth.oauth.denyAuthorization;
+    const { data: d, error: e } = await fn.call(sb.auth.oauth, authorizationId);
+    if (e || !d) return fail(e?.message || "Request failed.");
+    location.replace(d.redirect_url);
+  };
+  document.getElementById("ok").onclick = () => decide(true);
+  document.getElementById("no").onclick = () => decide(false);
+}
+main().catch((e) => fail(e.message));
+</script>
+</body>
+</html>

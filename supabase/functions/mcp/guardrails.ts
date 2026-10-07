@@ -1,4 +1,4 @@
-import type { Asset } from "./alpaca";
+import type { Asset } from "./alpaca.ts";
 
 export interface GuardConfig {
   maxOrderPct: number;

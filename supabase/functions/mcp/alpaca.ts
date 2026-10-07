@@ -1,5 +1,3 @@
-import type { Env } from "./env";
-
 // Paper-only by construction. There is deliberately no env flag for the live
 // endpoint: going live means editing this constant and redeploying.
 export const ALPACA_TRADING_URL = "https://paper-api.alpaca.markets/v2";
@@ -70,14 +68,14 @@ export interface Order {
 }
 
 export class Alpaca {
-  constructor(private env: Pick<Env, "ALPACA_KEY_ID" | "ALPACA_SECRET_KEY">) {}
+  constructor(private keys: { keyId: string; secretKey: string }) {}
 
   private async req<T>(base: string, path: string, init: RequestInit = {}): Promise<T> {
     const res = await fetch(base + path, {
       ...init,
       headers: {
-        "APCA-API-KEY-ID": this.env.ALPACA_KEY_ID,
-        "APCA-API-SECRET-KEY": this.env.ALPACA_SECRET_KEY,
+        "APCA-API-KEY-ID": this.keys.keyId,
+        "APCA-API-SECRET-KEY": this.keys.secretKey,
         accept: "application/json",
         ...(init.body ? { "content-type": "application/json" } : {}),
       },
