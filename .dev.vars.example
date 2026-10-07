@@ -1,0 +1,8 @@
+# Copy to .dev.vars for local dev (gitignored). Use the *dev* GitHub OAuth app
+# (callback http://localhost:8788/callback) and a *paper* Alpaca key pair.
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+ALPACA_KEY_ID=
+ALPACA_SECRET_KEY=
+# Local dev only: override the public origin used in OAuth metadata
+PUBLIC_URL=http://localhost:8788
