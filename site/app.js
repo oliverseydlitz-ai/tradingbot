@@ -1061,7 +1061,14 @@ async function submitTrade() {
   if (T.size === "notional") body.notional = parseAmount(T.amount); else body.qty = parseAmount(T.amount);
   if (T.type === "limit") body.limit_price = parseAmount(T.limit);
   if (T.note) body.note = T.note;
-  const known = S.trades.reduce((m, t) => Math.max(m, Number(t.id) || 0), 0);
+  // The newest trade-log id before sending: anything above it with this exact order is ours.
+  let known = S.tradesAt ? S.trades.reduce((m, t) => Math.max(m, Number(t.id) || 0), 0) : null;
+  if (known == null) {
+    try {
+      const t = await api("/trades?limit=5", { timeout: 6000 });
+      if (t.status === 200) known = (t.body.trades ?? []).reduce((m, x) => Math.max(m, Number(x.id) || 0), 0);
+    } catch { /* leave unknown */ }
+  }
   let r;
   try {
     r = await api("/order", { method: "POST", body: JSON.stringify(body), timeout: 30_000 });
@@ -1069,7 +1076,7 @@ async function submitTrade() {
   } catch (err) {
     // We don't know whether the order reached the broker. Look for it before allowing another try.
     T.busyText = "Checking whether it went through…"; renderReview();
-    const hit = await findOrder(body, known);
+    const hit = known == null ? undefined : await findOrder(body, known);
     inFlight = false; T.busy = false; T.review = false;
     T.error = hit === undefined
       ? `${err.message} Couldn't check whether the order went through. Close this and look at the trade log before trying again.`
@@ -1278,6 +1285,7 @@ async function boot() {
     await sb.auth.signOut().catch(() => {});
     return renderGate(`The GitHub account "${S.login}" doesn't have access.`);
   }
+  if (history.state?.sheet) history.replaceState(null, ""); // a reload never starts inside a sheet's history entry
   mountShell();
   wireMain();
   document.getElementById("main").innerHTML = skeletonHtml();
