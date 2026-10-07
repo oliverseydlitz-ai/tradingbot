@@ -30,6 +30,8 @@ export interface Position {
   unrealized_pl: string;
   unrealized_plpc: string;
   unrealized_intraday_pl: string;
+  unrealized_intraday_plpc?: string;
+  cost_basis?: string;
   side: string;
 }
 
@@ -114,6 +116,11 @@ export class Alpaca {
   getOrders(status: "open" | "closed" | "all", limit: number) {
     return this.trading<Order[]>(
       `/orders?status=${status}&limit=${limit}&direction=desc`,
+    );
+  }
+  getPortfolioHistory(period: string) {
+    return this.trading<{ timestamp: number[]; equity: (number | null)[]; base_value: number }>(
+      `/account/portfolio/history?period=${encodeURIComponent(period)}&timeframe=1D&intraday_reporting=market_hours&pnl_reset=no_reset`,
     );
   }
   placeOrder(body: Record<string, unknown>) {

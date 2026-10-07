@@ -1,7 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { Alpaca, AlpacaError, type Order } from "./alpaca.ts";
-import { checkOrder, type GuardConfig } from "./guardrails.ts";
+import type { Alpaca } from "./alpaca.ts";
+import type { GuardConfig } from "./guardrails.ts";
+import { slimOrder, submitOrder } from "./order-service.ts";
 import { nyDate, type Store } from "./store.ts";
 
 const text = (v: unknown, isError = false) => ({
@@ -11,30 +12,15 @@ const text = (v: unknown, isError = false) => ({
 
 const symbolSchema = z.string().regex(/^[A-Za-z]{1,5}(\.[A-Za-z])?$/, "Expected a US ticker like AAPL or BRK.B");
 const sym = (s: string) => s.trim().toUpperCase();
-const num = (s: string | null | undefined) => (s == null ? null : Number(s));
-
-const slimOrder = (o: Order) => ({
-  id: o.id,
-  symbol: o.symbol,
-  side: o.side,
-  type: o.type,
-  status: o.status,
-  qty: num(o.qty),
-  notional: num(o.notional),
-  filled_qty: num(o.filled_qty),
-  filled_avg_price: num(o.filled_avg_price),
-  limit_price: num(o.limit_price),
-  submitted_at: o.submitted_at,
-  filled_at: o.filled_at,
-});
 
 export interface ToolDeps {
   alpaca: Alpaca;
   store: Store;
-  cfg: GuardConfig;
+  /** Resolves the limits in force right now (dashboard-edited settings, else defaults). */
+  getCfg: () => Promise<GuardConfig>;
 }
 
-export function createServer({ alpaca, store, cfg }: ToolDeps) {
+export function createServer({ alpaca, store, getCfg }: ToolDeps) {
   const server = new McpServer({ name: "portfolio-mcp", version: "0.2.0" });
   const readOnly = { readOnlyHint: true, openWorldHint: true };
 
@@ -183,91 +169,12 @@ export function createServer({ alpaca, store, cfg }: ToolDeps) {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
     async (a) => {
-      const symbol = sym(a.symbol);
-      const date = nyDate();
-      const base = {
-        symbol,
-        side: a.side,
-        qty: a.qty ?? null,
-        notional: a.notional ?? null,
-        orderType: a.order_type,
-        limitPrice: a.limit_price ?? null,
-        reason: a.reason,
-      };
-
-      const [account, clock, positions, openOrders, ordersToday, asset] = await Promise.all([
-        alpaca.getAccount(),
-        alpaca.getClock(),
-        alpaca.getPositions(),
-        alpaca.getOrders("open", 200),
-        store.countOrdersToday(date),
-        alpaca.getAsset(symbol).catch((e) => {
-          if (e instanceof AlpacaError && e.status === 404) return null;
-          throw e;
-        }),
-      ]);
-      const equity = Number(account.equity);
-
-      const reject = async (rule: string, message: string) => {
-        await store.insertTrade(date, { ...base, status: "rejected", equity, error: `${rule}: ${message}` });
-        return text(`REJECTED by guardrail ${rule}: ${message}`, true);
-      };
-
-      if (!asset) return reject("UNKNOWN_SYMBOL", `${symbol} is not a known Alpaca asset.`);
-      if (account.trading_blocked || account.account_blocked) {
-        return reject("ACCOUNT_BLOCKED", "Alpaca reports trading is blocked on this account.");
-      }
-
-      // Price estimate for sizing/guardrails.
-      let price: number | null = a.limit_price ?? null;
-      if (price === null && a.qty !== undefined) {
-        const s = (await alpaca.getSnapshots([symbol]))[symbol];
-        price = (a.side === "buy" ? s?.latestQuote?.ap : s?.latestQuote?.bp) || s?.latestTrade?.p || null;
-      }
-
-      const pos = positions.find((p) => p.symbol === symbol);
-      const openBuyCommitted = openOrders
-        .filter((o) => o.side === "buy")
-        .reduce((sum, o) => sum + (num(o.notional) ?? (num(o.qty) ?? 0) * (num(o.limit_price) ?? 0)), 0);
-      const openSellQty = openOrders
-        .filter((o) => o.side === "sell" && o.symbol === symbol)
-        .reduce((sum, o) => sum + (num(o.qty) ?? 0) - (num(o.filled_qty) ?? 0), 0);
-
-      const verdict = checkOrder(
-        { symbol, side: a.side, orderType: a.order_type, qty: a.qty, notional: a.notional, limitPrice: a.limit_price },
-        {
-          marketOpen: clock.is_open,
-          asset,
-          price,
-          equity,
-          cash: Number(account.cash),
-          openBuyCommitted,
-          openSellQty,
-          position: pos ? { qty: Number(pos.qty), marketValue: Number(pos.market_value) } : null,
-          ordersToday,
-        },
-        cfg,
+      const r = await submitOrder(
+        { alpaca, store, cfg: await getCfg() },
+        { ...a, symbol: sym(a.symbol) },
+        "mcp",
       );
-      if (!verdict.ok) return reject(verdict.rule, verdict.message);
-
-      // Reserve the daily slot before talking to Alpaca, so concurrent calls count.
-      const tradeId = await store.insertTrade(date, { ...base, status: "pending", equity });
-      try {
-        const order = await alpaca.placeOrder({
-          symbol,
-          side: a.side,
-          type: a.order_type,
-          time_in_force: "day",
-          ...(a.qty !== undefined ? { qty: String(a.qty) } : { notional: String(a.notional) }),
-          ...(a.order_type === "limit" ? { limit_price: String(a.limit_price) } : {}),
-        });
-        await store.finishTrade(tradeId, { status: "accepted", alpacaOrderId: order.id });
-        return text({ trade_id: tradeId, orders_today: ordersToday + 1, estimated_notional: verdict.notional, order: slimOrder(order) });
-      } catch (e) {
-        const msg = (e as Error).message;
-        await store.finishTrade(tradeId, { status: "failed", error: msg });
-        return text(`Alpaca rejected the order: ${msg}`, true);
-      }
+      return r.ok ? text(r.data) : text(r.message, true);
     },
   );
 

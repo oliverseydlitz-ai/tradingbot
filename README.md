@@ -7,7 +7,7 @@ Remote MCP server that lets Claude trade an **Alpaca paper-trading account**, pl
 | MCP server (`supabase/functions/mcp`) | Supabase Edge Function: `https://kdbmfnybaqcgluxqhntp.supabase.co/functions/v1/mcp` |
 | Login | Supabase Auth (GitHub provider + OAuth 2.1 server with dynamic client registration) |
 | Trade log + SPY snapshots | Supabase Postgres (`trades`, `snapshots`; RLS on, no public access) |
-| Consent page + (phase 2) dashboard | GitHub Pages from `site/` at `https://portfolio.oliverseydlitz.com` |
+| Consent page + dashboard | GitHub Pages from `site/` at `https://portfolio.oliverseydlitz.com` (`/` is the dashboard, `/oauth/consent` the connector consent page) |
 | DNS only | Cloudflare (`portfolio` CNAME to `oliverseydlitz-ai.github.io`, DNS-only) |
 
 **Paper only.** The Alpaca base URL is a constant in `supabase/functions/mcp/alpaca.ts`; there is no switch to live.
@@ -18,6 +18,16 @@ Remote MCP server that lets Claude trade an **Alpaca paper-trading account**, pl
 `place_order` guardrails (`guardrails.ts`, enforced server-side): market open, US equities/ETFs only, long-only,
 no margin (buys must fit in cash net of open buys), max order 10% of equity (buys), max position 20% of equity after the
 order, max 10 orders/day, optional `SYMBOL_ALLOWLIST`, mandatory `reason`. Every attempt, including rejections, is logged.
+
+## Dashboard
+Sign in with GitHub (same allowlist). It shows equity vs SPY (indexed), allocation (stocks / ETFs / bond ETFs / cash), best and worst
+performers, positions, a manual trade ticket, open orders, the trade log, and editable limits. It talks to the same edge function under
+`/functions/v1/mcp/api/*`, authenticated with your Supabase session token.
+
+- Manual orders use the same guardrails and logging as Claude's (`order-service.ts`), tagged `source = manual`. The daily order cap counts Claude's orders only.
+- Limits live in the `settings` table (hard ceiling of 100% on the percentages, 1 to 100 orders/day). If none are saved, the `MAX_*` / `SYMBOL_ALLOWLIST` function secrets are the defaults.
+- Claude has no MCP tool for changing limits; only the dashboard can.
+- Bonds are bond ETFs, classified by asset name (`categorize.ts`). Crypto is excluded.
 
 ## Security model
 - Only the GitHub login `ALLOWED_GITHUB_LOGIN` (default `oliverseydlitz-ai`) is accepted. Enforced in the edge function on every request (`auth.ts`), and also on the consent page.
