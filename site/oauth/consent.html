@@ -11,16 +11,16 @@
 <link rel="stylesheet" href="/shared.css">
 </head>
 <body>
-<main><div class="mark"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 17l5-4.5 3.5 2L18 7l3 1.5" stroke="var(--accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 20.5l18-5" stroke="var(--mute)" stroke-width="1.4" stroke-dasharray="1.5 2.5" stroke-linecap="round"/></svg>Portfolio</div><div id="app"><p class="mut">Loading…</p></div></main>
+<main><div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 17l5-4.5 3.5 2L18 7l3 1.5" stroke="var(--accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 20.5l18-5" stroke="var(--mute)" stroke-width="1.4" stroke-dasharray="1.5 2.5" stroke-linecap="round"/></svg>Portfolio</div><div id="app"><p class="mut">Loading…</p></div></main>
 <script type="module">
-import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
+import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/+esm";
 import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, ALLOWED_GITHUB_LOGIN } from "/config.js";
 
 const app = document.getElementById("app");
 const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const show = (html) => (app.innerHTML = html);
-const fail = (msg) => show(`<h1>Can't continue.</h1><p class="err">${esc(msg)}</p>`);
+const fail = (msg) => show(`<h1>Can't continue.</h1><p class="err" role="alert">${esc(msg)}</p>`);
 
 const authorizationId = new URLSearchParams(location.search).get("authorization_id");
 
@@ -56,11 +56,13 @@ async function main() {
     </dl>
     <p class="mut">Only approve if you just added this connector yourself.</p>
     <button class="primary" id="ok">Approve</button><button id="no">Deny</button>`);
+  document.title = `Authorize ${data.client.name}`;
 
   const decide = async (approve) => {
     app.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    document.getElementById(approve ? "ok" : "no").textContent = approve ? "Approving…" : "Denying…";
     const fn = approve ? sb.auth.oauth.approveAuthorization : sb.auth.oauth.denyAuthorization;
-    const { data: d, error: e } = await fn.call(sb.auth.oauth, authorizationId);
+    const { data: d, error: e } = await fn.call(sb.auth.oauth, authorizationId).catch((err) => ({ error: err }));
     if (e || !d) return fail(e?.message || "Request failed.");
     location.replace(d.redirect_url);
   };
