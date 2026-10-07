@@ -10,6 +10,7 @@ const URL_BASE = "https://ref.supabase.co/functions/v1/mcp";
 function memStore() {
   const trades: (TradeRow & { id: number; date: string; alpacaOrderId?: string })[] = [];
   let settings: GuardConfig | null = null;
+  const notes: { id: number; created_at: string; note_date: string; title: string | null; tags: string[]; body: string }[] = [];
   const snapshots: Record<string, unknown> = {};
   const store: Store = {
     countOrdersToday: async (d) => trades.filter((t) => t.date === d && t.source === "mcp" && ["pending", "accepted", "canceled"].includes(t.status)).length,
@@ -17,11 +18,13 @@ function memStore() {
     finishTrade: async (id, p) => void Object.assign(trades[id - 1], { status: p.status, alpacaOrderId: p.alpacaOrderId, error: p.error }),
     markCanceled: async (oid) => void trades.filter((t) => t.alpacaOrderId === oid).forEach((t) => ((t as any).status = "canceled")),
     recordSnapshotIfFirstToday: async (d, equity, cash, spy) => void (snapshots[d] ??= { equity, cash, spy }),
+    saveNote: async (date, n) => (notes.push({ id: notes.length + 1, created_at: new Date().toISOString(), note_date: date, title: n.title ?? null, tags: n.tags, body: n.body }), notes.length),
+    listNotes: async (limit, tag) => notes.filter((n) => !tag || n.tags.includes(tag)).slice().reverse().slice(0, limit),
     getSettings: async () => settings,
     saveSettings: async (c) => void (settings = c),
     listTrades: async (limit, symbol) => trades.filter((t) => !symbol || t.symbol === symbol).slice().reverse().slice(0, limit),
   };
-  return { store, trades, snapshots };
+  return { store, trades, snapshots, notes };
 }
 
 const mk = (authenticate = async (t: string) => (t === "good" ? { login: "oliver" } : null)) => {
@@ -132,10 +135,10 @@ describe("tools (mocked Alpaca + in-memory store)", () => {
     placed.length = 0;
   });
 
-  it("lists all nine tools", async () => {
+  it("lists all eleven tools", async () => {
     const { body } = await rpc(mk().handler, "tools/list", {});
     expect(body.result.tools.map((t: any) => t.name).sort()).toEqual(
-      ["cancel_order", "get_account", "get_bars", "get_market_clock", "get_orders", "get_positions", "get_quotes", "get_trade_log", "place_order"],
+      ["cancel_order", "get_account", "get_bars", "get_market_clock", "get_notes", "get_orders", "get_positions", "get_quotes", "get_trade_log", "place_order", "save_note"],
     );
   });
 
@@ -177,6 +180,28 @@ describe("tools (mocked Alpaca + in-memory store)", () => {
     }
     expect((await call(handler, "place_order", { symbol: "SPY", side: "buy", qty: 1, reason: "the eleventh order" })).text).toMatch(/MAX_ORDERS_PER_DAY/);
     expect(placed).toHaveLength(10);
+  });
+
+  it("save_note / get_notes carry a no-trade day over to the next run", async () => {
+    const { handler, trades, notes } = mk();
+    const saved = await call(handler, "save_note", { title: "No trades", body: "Held everything. Watching NVDA earnings; re-check if it gaps below 220.", tags: ["Daily", "watchlist", "daily"] });
+    expect(saved.isError).toBe(false);
+    expect(JSON.parse(saved.text)).toMatchObject({ note_id: 1 });
+    expect(notes[0].tags).toEqual(["daily", "watchlist"]); // lower-cased and de-duplicated
+    expect(trades).toHaveLength(0); // a note is not a trade
+    await call(handler, "save_note", { body: "Second note, different tag.", tags: ["thesis"] });
+    const all = JSON.parse((await call(handler, "get_notes", { limit: 10 })).text);
+    expect(all.map((n: any) => n.id)).toEqual([2, 1]); // newest first
+    const daily = JSON.parse((await call(handler, "get_notes", { tag: "DAILY" })).text);
+    expect(daily).toHaveLength(1);
+    expect(daily[0].body).toMatch(/NVDA earnings/);
+  });
+
+  it("rejects empty and oversized notes", async () => {
+    const { handler, notes } = mk();
+    expect((await call(handler, "save_note", { body: "   " })).isError).toBe(true);
+    expect((await call(handler, "save_note", { body: "x".repeat(8001) })).isError).toBe(true);
+    expect(notes).toHaveLength(0);
   });
 
   it("get_trade_log reads back decisions", async () => {
@@ -268,6 +293,15 @@ describe("dashboard API", () => {
     expect(saved.body.settings).toEqual({ maxOrderPct: 1, maxPositionPct: 5, maxOrdersPerDay: 2, allowlist: ["SPY", "QQQ"] });
     expect((await call(handler, "place_order", { symbol: "SPY", side: "buy", qty: 20, reason: "now over the 1 percent cap" })).text).toMatch(/MAX_ORDER_PCT/);
     expect((await call(handler, "place_order", { symbol: "AAPL", side: "buy", qty: 1, reason: "not on the allowlist" })).text).toMatch(/SYMBOL_ALLOWLIST/);
+  });
+
+  it("exposes notes to the dashboard", async () => {
+    const { handler } = mk();
+    await call(handler, "save_note", { body: "Dashboard-visible note", tags: ["daily"] });
+    const r = await api(handler, "GET", "/notes");
+    expect(r.status).toBe(200);
+    expect(r.body.notes[0].body).toBe("Dashboard-visible note");
+    expect((await api(handler, "GET", "/notes", undefined, "bad")).status).toBe(401);
   });
 
   it("gives Claude no way to change its own limits", async () => {

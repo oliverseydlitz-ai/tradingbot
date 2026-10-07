@@ -17,6 +17,12 @@ export interface TradeRow {
   error?: string | null;
 }
 
+export interface NoteInput {
+  title?: string;
+  body: string;
+  tags: string[];
+}
+
 /** Persistence port. The edge function uses the Postgres implementation in supabase-store.ts. */
 export interface Store {
   /** MCP (Claude) orders that consume the daily cap: pending, accepted or canceled (rejections and manual orders don't count). */
@@ -29,4 +35,7 @@ export interface Store {
   /** Limits edited from the dashboard; null if never saved. */
   getSettings(): Promise<GuardConfig | null>;
   saveSettings(cfg: GuardConfig): Promise<void>;
+  /** Claude's notes, kept so a later run can pick up where an earlier one left off. */
+  saveNote(date: string, note: NoteInput): Promise<number>;
+  listNotes(limit: number, tag?: string): Promise<unknown[]>;
 }

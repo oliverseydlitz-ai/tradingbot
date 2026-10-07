@@ -13,7 +13,9 @@ Remote MCP server that lets Claude trade an **Alpaca paper-trading account**, pl
 **Paper only.** The Alpaca base URL is a constant in `supabase/functions/mcp/alpaca.ts`; there is no switch to live.
 
 ## Tools
-`get_account`, `get_positions`, `get_quotes`, `get_bars`, `get_market_clock`, `get_orders`, `place_order`, `cancel_order`, `get_trade_log`.
+`get_account`, `get_positions`, `get_quotes`, `get_bars`, `get_market_clock`, `get_orders`, `place_order`, `cancel_order`, `get_trade_log`, `save_note`, `get_notes`.
+
+`save_note` / `get_notes` are Claude's memory between scheduled runs (table `notes`): at the start of a run it reads recent notes, at the end it saves one, so a day with no trades still leaves context for the next run. Notes show on the dashboard.
 
 `place_order` guardrails (`guardrails.ts`, enforced server-side): market open, US equities/ETFs only, long-only,
 no margin (buys must fit in cash net of open buys), max order 10% of equity (buys), max position 20% of equity after the
