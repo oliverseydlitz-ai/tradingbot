@@ -127,6 +127,11 @@ export function createApi({ alpaca, store, getCfg }: ApiDeps) {
       return json({ trades: await store.listTrades(limit) });
     }
 
+    if (route === "/notes" && m === "GET") {
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 20) || 20, 1), 50);
+      return json({ notes: await store.listNotes(limit) });
+    }
+
     if (route === "/quote" && m === "GET") {
       const symbol = (url.searchParams.get("symbol") ?? "").trim().toUpperCase();
       if (!symbolRe.test(symbol)) return json({ error: "bad symbol" }, 400);

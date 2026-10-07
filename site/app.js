@@ -13,7 +13,7 @@ const arrow = (n) => (n > 0 ? "▲" : n < 0 ? "▼" : "•");
 const tone = (n) => (n > 0 ? "gain" : n < 0 ? "loss" : "mut");
 const pl = (n, p) => `<span class="${tone(n)}">${arrow(n)} ${sgn(n)}${usd(Math.abs(n))} (${pct(p)})</span>`;
 
-const state = { data: null, trades: [], history: [], period: "1M", chartTable: false, ticket: { side: "buy", size: "notional", type: "market" }, quote: null, review: null, msg: null, settingsMsg: null };
+const state = { data: null, trades: [], notes: [], history: [], period: "1M", chartTable: false, ticket: { side: "buy", size: "notional", type: "market" }, quote: null, review: null, msg: null, settingsMsg: null };
 
 async function api(path, opts = {}) {
   const { data: { session } } = await sb.auth.getSession();
@@ -173,6 +173,11 @@ function ordersCard(d) {
   return `<div class="card"><h2>Open orders</h2><div class="list">${d.open_orders.map((o) => `<div class="row it"><span><b>${esc(o.side.toUpperCase())} ${esc(o.symbol)}</b> ${o.qty ? o.qty + " sh" : usd(o.notional)} ${esc(o.type)}${o.limit_price ? " @ " + usd(o.limit_price) : ""}<div class="sub">${esc(o.status)}</div></span><button class="sm" data-cancel="${esc(o.id)}">Cancel</button></div>`).join("")}</div></div>`;
 }
 
+function notesCard() {
+  const n = state.notes;
+  return `<div class="card"><h2>Claude's notes</h2>${n.length ? n.map((x, i) => `<details class="it" ${i === 0 ? "open" : ""} style="padding:9px 0;border-top:${i ? "1px solid var(--line)" : "0"}"><summary style="cursor:pointer;font-size:.85rem"><b>${esc(x.title || "Note")}</b> <span class="sub">${esc(x.note_date)}</span>${(x.tags || []).map((t) => `<span class="badge">${esc(t)}</span>`).join("")}</summary><div style="white-space:pre-wrap;font-size:.85rem;margin-top:6px">${esc(x.body)}</div></details>`).join("") : `<p class="mut">No notes yet. Claude saves one at the end of each run.</p>`}</div>`;
+}
+
 function logCard() {
   return `<div class="card"><h2>Trade log</h2><div class="list">${state.trades.length ? state.trades.map((t) => `<div class="it"><div class="row"><span><b>${esc(t.side.toUpperCase())} ${esc(t.symbol)}</b> ${t.qty ? t.qty + " sh" : usd(t.notional)}<span class="badge">${esc(t.source)}</span><span class="badge">${esc(t.status)}</span></span><span class="sub">${esc(new Date(t.created_at).toLocaleString())}</span></div>
     <div class="sub">${esc(t.reason)}${t.error ? `<br><span class="loss">${esc(t.error)}</span>` : ""}</div></div>`).join("") : `<p class="mut">No trades yet.</p>`}</div></div>`;
@@ -194,7 +199,7 @@ function limitsCard(d) {
 function render() {
   const d = state.data;
   app.innerHTML = `<div class="top"><div><h1>Portfolio</h1><span class="pill ${d.market.is_open ? "open" : "closed"}">${d.market.is_open ? "Market open" : "Market closed"}</span></div><div class="row" style="gap:8px;flex-wrap:nowrap"><button class="sm" id="refresh">Refresh</button><button class="sm" id="logout">Sign out</button></div></div>
-    ${kpis(d)}${chartCard()}${allocationCard(d)}${performers(d)}${positionsCard(d)}${ticketCard()}${ordersCard(d)}${limitsCard(d)}${logCard()}`;
+    ${kpis(d)}${chartCard()}${allocationCard(d)}${performers(d)}${positionsCard(d)}${ticketCard()}${ordersCard(d)}${limitsCard(d)}${notesCard()}${logCard()}`;
   if (!state.chartTable) wireChart(state.history);
 }
 
@@ -204,10 +209,11 @@ async function loadHistory() {
 }
 
 async function load() {
-  const [p, t] = await Promise.all([api("/portfolio"), api("/trades?limit=30")]);
+  const [p, t, n] = await Promise.all([api("/portfolio"), api("/trades?limit=30"), api("/notes?limit=10")]);
   if (p.status !== 200) throw new Error(p.body.error || "Could not load portfolio");
   state.data = p.body;
   state.trades = t.body.trades ?? [];
+  state.notes = n.body.notes ?? [];
   await loadHistory();
   render();
 }

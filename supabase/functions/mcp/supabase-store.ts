@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import type { GuardConfig } from "./guardrails.ts";
-import type { Store, TradeRow } from "./store.ts";
+import type { NoteInput, Store, TradeRow } from "./store.ts";
 
 const fail = (op: string, error: { message: string } | null) => {
   if (error) throw new Error(`db ${op}: ${error.message}`);
@@ -90,6 +90,22 @@ export function supabaseStore(url: string, serviceKey: string): Store {
         updated_at: new Date().toISOString(),
       });
       fail("save settings", error);
+    },
+    async saveNote(date, n: NoteInput) {
+      const { data, error } = await db
+        .from("notes")
+        .insert({ note_date: date, title: n.title ?? null, body: n.body, tags: n.tags })
+        .select("id")
+        .single();
+      fail("save note", error);
+      return data!.id as number;
+    },
+    async listNotes(limit, tag) {
+      let q = db.from("notes").select("id, created_at, note_date, title, tags, body").order("id", { ascending: false }).limit(limit);
+      if (tag) q = q.contains("tags", [tag]);
+      const { data, error } = await q;
+      fail("list notes", error);
+      return data ?? [];
     },
   };
 }
