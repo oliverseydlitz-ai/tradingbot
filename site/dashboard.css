@@ -814,7 +814,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 .sk-card .sk { display: block; }
 .hero .sk { display: block; }
 @keyframes shimmer { from { background-position: 120% 0; } to { background-position: -120% 0; } }
-.skeleton { display: grid; place-items: center; min-height: 70dvh; color: var(--mute); font: 500 11px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; }
+.skeleton { display: grid; place-items: center; align-content: center; text-align: center; min-height: 70dvh; color: var(--mute); font: 500 11px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; }
 
 /* Hover affordances only where a pointer can hover (no sticky hover on touch). */
 @media (hover: hover) {
