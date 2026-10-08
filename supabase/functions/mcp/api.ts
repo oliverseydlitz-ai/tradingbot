@@ -104,20 +104,37 @@ export function createApi({ alpaca, store, getCfg }: ApiDeps) {
     if (route === "/history" && m === "GET") {
       const period = url.searchParams.get("period") ?? "1M";
       if (!(period in PERIOD_BARS)) return json({ error: "bad period" }, 400);
-      const [hist, bars] = await Promise.all([alpaca.getPortfolioHistory(period), alpaca.getDailyBars("SPY", PERIOD_BARS[period])]);
+      const [hist, bars, account, snaps] = await Promise.all([
+        alpaca.getPortfolioHistory(period),
+        alpaca.getDailyBars("SPY", PERIOD_BARS[period]),
+        alpaca.getAccount().catch(() => null),
+        alpaca.getSnapshots(["SPY"]).catch(() => ({}) as Awaited<ReturnType<Alpaca["getSnapshots"]>>),
+      ]);
       const spy = new Map(bars.map((b) => [b.date, b.c as number]));
       const rows = hist.timestamp
-        .map((t, i) => ({ date: nyDate(new Date(t * 1000)), equity: hist.equity[i] }))
-        .filter((r): r is { date: string; equity: number } => !!r.equity && r.equity > 0 && spy.has(r.date));
+        .map((t, i) => ({ date: nyDate(new Date(t * 1000)), equity: hist.equity[i], spy: 0 }))
+        .filter((r): r is { date: string; equity: number; spy: number } => !!r.equity && r.equity > 0 && spy.has(r.date))
+        .map((r) => ({ ...r, spy: spy.get(r.date)! }));
+      // Alpaca's daily portfolio history only gains today's point once the day is finalised, so the
+      // latest trading day comes from live values instead: current equity and SPY's latest trade.
+      const snap = snaps.SPY;
+      const liveDate = snap?.dailyBar?.t ? nyDate(new Date(snap.dailyBar.t)) : null;
+      const liveSpy = snap?.latestTrade?.p ?? snap?.dailyBar?.c ?? null;
+      const liveEquity = account ? Number(account.equity) : NaN;
+      if (liveDate && liveSpy && liveSpy > 0 && liveEquity > 0) {
+        const last = rows[rows.length - 1];
+        if (last?.date === liveDate) Object.assign(last, { equity: liveEquity, spy: liveSpy });
+        else if (!last || liveDate > last.date) rows.push({ date: liveDate, equity: liveEquity, spy: liveSpy });
+      }
       if (!rows.length) return json({ points: [] });
       const e0 = rows[0].equity;
-      const s0 = spy.get(rows[0].date)!;
+      const s0 = rows[0].spy;
       return json({
         points: rows.map((r) => ({
           date: r.date,
           equity: r.equity,
           portfolio: (r.equity / e0) * 100,
-          spy: (spy.get(r.date)! / s0) * 100,
+          spy: (r.spy / s0) * 100,
         })),
       });
     }
