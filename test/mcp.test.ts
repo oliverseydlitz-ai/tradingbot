@@ -43,6 +43,7 @@ const mk = (authenticate = async (t: string) => (t === "good" ? { login: "oliver
 
 // ---- fake Alpaca over global fetch ----
 let market = { is_open: true };
+let liveBarT = ""; // SPY snapshot daily-bar timestamp; "" = no live day
 const account = { equity: "100000", last_equity: "99000", cash: "100000", buying_power: "100000", portfolio_value: "100000", status: "ACTIVE" };
 let positions: any[] = [];
 const NAMES: Record<string, string> = { SPY: "SPDR S&P 500 ETF Trust", TLT: "iShares 20+ Year Treasury Bond ETF", AAPL: "Apple Inc. Common Stock" };
@@ -74,7 +75,7 @@ function alpacaFetch(input: any, init?: any) {
   if (url.hostname === "data.alpaca.markets" && url.pathname === "/v2/stocks/snapshots") {
     const out: any = {};
     for (const s of url.searchParams.get("symbols")!.split(","))
-      out[s] = { latestTrade: { p: 100, t: "" }, latestQuote: { ap: 100, bp: 99.9, as: 1, bs: 1, t: "" }, dailyBar: { o: 1, h: 1, l: 1, c: 100, v: 1, t: "" }, prevDailyBar: { c: 99 } };
+      out[s] = { latestTrade: { p: s === "SPY" && liveBarT ? 721 : 100, t: "" }, latestQuote: { ap: 100, bp: 99.9, as: 1, bs: 1, t: "" }, dailyBar: { o: 1, h: 1, l: 1, c: 100, v: 1, t: s === "SPY" ? liveBarT : "" }, prevDailyBar: { c: 99 } };
     return json(out);
   }
   if (url.hostname === "data.alpaca.markets" && url.pathname === "/v2/stocks/bars") {
@@ -268,6 +269,26 @@ describe("dashboard API", () => {
     expect(body.points).toHaveLength(3);
     expect(body.points[0]).toMatchObject({ portfolio: 100, spy: 100 });
     expect(body.points[2].portfolio).toBeCloseTo(102);
+  });
+
+  it("adds today's live point when the daily history hasn't caught up, and refreshes it when it has", async () => {
+    const day = (i: number) => new Date(1790000000 * 1000 + i * 86400_000);
+    try {
+      // Today (day 3) is missing from the history: appended from live equity (100000) and SPY's latest trade (721).
+      liveBarT = day(3).toISOString();
+      let { body } = await api(mk().handler, "GET", "/history?period=1M");
+      expect(body.points).toHaveLength(4);
+      expect(body.points[3]).toMatchObject({ date: nyDate(day(3)), equity: 100000, portfolio: 100 });
+      expect(body.points[3].spy).toBeCloseTo((721 / 700) * 100);
+      // Today is already the last history day: its values are replaced with the live ones.
+      liveBarT = day(2).toISOString();
+      ({ body } = await api(mk().handler, "GET", "/history?period=1M"));
+      expect(body.points).toHaveLength(3);
+      expect(body.points[2]).toMatchObject({ equity: 100000, portfolio: 100 });
+      expect(body.points[2].spy).toBeCloseTo((721 / 700) * 100);
+    } finally {
+      liveBarT = "";
+    }
   });
 
   it("manual orders go through the guardrails, are logged as manual, and skip the daily cap", async () => {
