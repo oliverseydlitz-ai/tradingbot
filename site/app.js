@@ -79,12 +79,13 @@ const alertHtml = (raw) => {
 
 /* ---------- icons (hand-drawn, 24px grid) ---------- */
 const I = {
-  mark: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 17l5-4.5 3.5 2L18 7l3 1.5" stroke="var(--accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 20.5l18-5" stroke="var(--mute)" stroke-width="1.4" stroke-dasharray="1.5 2.5" stroke-linecap="round"/></svg>`,
+  mark: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2 18l5.5-5 3.5 2.5L17.5 6 22 8.5" stroke="var(--accent)" stroke-width="2.2" stroke-linejoin="miter" stroke-miterlimit="6"/><path d="M2 21.25h20" stroke="var(--mute)" stroke-width="1.5"/></svg>`,
   up: `<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 2.5l3.8 6H2.2z" fill="currentColor"/></svg>`,
   down: `<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 9.5l3.8-6H2.2z" fill="currentColor"/></svg>`,
   refresh: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v4.5h-4.5"/></svg>`,
   sliders: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2.2"/><circle cx="8" cy="17" r="2.2"/></svg>`,
   close: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>`,
+  trade: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="miter" aria-hidden="true"><path d="M8 20V5M3.5 9.5L8 5l4.5 4.5M16 4v15M11.5 14.5L16 19l4.5-4.5"/></svg>`,
   plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>`,
   buy: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 12.5v-9M4 7.5l4-4 4 4"/></svg>`,
   sell: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3.5v9M4 8.5l4 4 4-4"/></svg>`,
@@ -165,16 +166,31 @@ function expire() {
 }
 
 /* ---------- sign-in ---------- */
+// A drawn-to-scale miniature of the dashboard chart: illustrative paths, labelled by name, never by fake numbers.
+function gateArt() {
+  const c = [0, 1.3, 0.5, 2.2, 1.5, 3.5, 2.3, 3.1, 5, 4, 5.8, 4.6, 7, 6.2, 5.1, 7.6, 9, 7.8, 10.2, 9.2, 11.4, 10.5, 12.9, 14.3];
+  const b = [0, 0.7, 0.3, 1.2, 0.9, 1.8, 1.3, 2, 2.7, 2.2, 3.2, 2.8, 3.7, 3.3, 2.9, 3.9, 4.6, 4.1, 5, 4.6, 5.5, 5.1, 6, 6.5];
+  const W = 345, H = 150, padT = 10, padB = 22, tagW = 70, notch = 5, plotR = W - tagW - 10, n = c.length;
+  const x = (i) => (i / (n - 1)) * plotR, y = (v) => padT + (1 - (v + 1) / 16.5) * (H - padT - padB);
+  const path = (a) => a.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join("");
+  const tag = (v, text, fill, ink, stroke) => `<g transform="translate(${W - tagW} ${(y(v) - 9.5).toFixed(1)})"><path d="M0 9.5L${notch} 0H${tagW}V19H${notch}Z" fill="${fill}"${stroke ? ` stroke="${stroke}"` : ""}/><text x="${(tagW + notch) / 2}" y="13.2" text-anchor="middle" font-size="10" font-weight="500" letter-spacing=".08em" font-family="var(--mono)" fill="${ink}">${text}</text></g>`;
+  const grid = [3, 7, 11].map((v) => `<path d="M0 ${y(v).toFixed(1)}H${plotR}" stroke="var(--line)"/>`).join("");
+  return `<svg class="art" viewBox="0 0 ${W} ${H}" aria-hidden="true">
+    ${grid}<path d="M0 ${y(0).toFixed(1)}H${plotR}" stroke="var(--ctl)"/>
+    <path d="M0 ${H - padB}H${plotR}${[0, 0.5, 1].map((k) => `M${(k * plotR).toFixed(1)} ${H - padB}v4`).join("")}" stroke="var(--line-2)" fill="none"/>
+    <path d="${path(b)}" fill="none" stroke="var(--spy)" stroke-width="1.25" stroke-linejoin="miter" opacity=".9"/>
+    <path d="${path(c)}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="miter" stroke-miterlimit="3" pathLength="1" style="stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1.6s var(--ease) .2s forwards"/>
+    <circle cx="${x(n - 1)}" cy="${y(last(c))}" r="4" fill="var(--accent)" stroke="var(--bg)" stroke-width="2" style="opacity:0;animation:fadein .4s var(--ease) 1.7s forwards"/>
+    ${tag(last(c), "CLAUDE", "var(--accent)", "var(--accent-ink)")}${tag(last(b), "S&amp;P 500", "var(--bg)", "var(--ink-2)", "var(--ctl)")}
+  </svg>`;
+}
 function renderGate(note) {
   root.innerHTML = `<main class="gate">
     <div class="mark">${I.mark}<span>Portfolio</span></div>
     <div class="gate-art">
       <h1>Claude <em>vs.</em><br>the market.</h1>
       <p>A paper-trading experiment. One model, one account, one benchmark: the S&amp;P 500.</p>
-      <svg class="squiggle" viewBox="0 0 400 120" preserveAspectRatio="none" aria-hidden="true">
-        <path d="M0 96 C40 92 60 70 95 74 S150 98 185 80 S240 40 275 46 S330 22 400 12" fill="none" stroke="var(--accent)" stroke-width="2.4" stroke-linecap="round" pathLength="1" style="stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1.6s var(--ease) .2s forwards"/>
-        <path d="M0 104 C60 100 120 90 200 78 S320 58 400 50" fill="none" stroke="var(--spy)" stroke-width="1.6" stroke-dasharray="4 6" stroke-linecap="round" opacity=".7"/>
-      </svg>
+      ${gateArt()}
     </div>
     <div>
       ${note ? `<div class="alert err" role="alert">${esc(note)}</div>` : ""}
@@ -301,7 +317,7 @@ function chartCardHtml() {
   const p = S.history[S.period] ?? [];
   const periods = [["1W", "1W", "1 week"], ["1M", "1M", "1 month"], ["3M", "3M", "3 months"], ["6M", "6M", "6 months"], ["1A", "1Y", "1 year"], ["all", "All", "All time"]];
   const body = p.length < 2
-    ? `<div class="plot-empty"><div><b>Building history</b>The curve appears once the account has two trading days on record.</div></div>`
+    ? `<div class="plot-empty"><div><b>Building history</b>The chart starts once the account has two trading days on record.</div><span class="z" aria-hidden="true">0%</span></div>`
     : `<div class="plot" id="plot"></div>`;
   return `<section class="card chart-card">
     <div class="card-h"><h2>Return vs benchmark</h2><span class="aside">indexed to 0%</span></div>
@@ -330,37 +346,41 @@ function allocationHtml(d) {
 function performanceHtml(d) {
   const rows = [...d.positions].sort((a, b) => b.unrealized_pl_pct - a.unrealized_pl_pct);
   if (!rows.length) return "";
-  // One runaway winner shouldn't flatten every other bar: cap the scale near the runner-up and mark clipped bars.
+  // One runaway winner shouldn't flatten every other bar: cap each side near the median move and mark clipped bars.
   const nz = rows.map((r) => Math.abs(r.unrealized_pl_pct)).filter((m) => m >= 0.005).sort((a, b) => b - a);
   const ref = nz.length ? nz[Math.floor(nz.length / 2)] : 0; // the median move
-  const cap = ref > 0 && nz[0] > 3 * ref ? ref * 3 : (nz[0] ?? 0);
-  const max = Math.max(0.5, cap);
+  const cap = (m) => (ref > 0 && m > 3 * ref ? ref * 3 : m);
+  // The zero line sits where the data puts it: a book of mostly winners gives the gains most of the width.
+  const vs = rows.map((r) => r.unrealized_pl_pct);
+  const hi = cap(Math.max(0, ...vs)), lo = cap(Math.max(0, -Math.min(0, ...vs)));
+  const span = Math.max(0.5, hi + lo), z = (lo / span) * 100; // zero, as % of the track
   const fill = { gain: "var(--gain)", loss: "var(--loss)", flat: "var(--mute)" };
   return `<section class="card perf-card"><div class="card-h"><h2>Best to worst</h2><span class="aside">return since entry</span></div>
-    <div class="perf">${rows.map((r, i) => {
-      const v = r.unrealized_pl_pct, t = tone(v), neg = t === "loss", clip = Math.abs(v) > max;
-      const w = t === "flat" ? 0 : Math.max((Math.min(Math.abs(v), max) / max) * 50, 1.2);
+    <div class="perf" style="--z:${z.toFixed(2)}%">${rows.map((r, i) => {
+      const v = r.unrealized_pl_pct, t = tone(v), neg = t === "loss", lim = neg ? lo : hi, clip = Math.abs(v) > lim + 1e-9;
+      const w = t === "flat" ? 0 : Math.max((Math.min(Math.abs(v), lim) / span) * 100, 0.8);
       return `<div class="perf-row"><span class="s">${esc(r.symbol)}</span>
-        <span class="t"><b class="${clip ? `clip${neg ? " neg" : ""}` : ""}" style="left:${neg ? 50 - w : 50}%;width:${w}%;background:${fill[t]};--o:${neg ? "right" : "left"};animation-delay:${i * 40}ms"></b></span>
+        <span class="t"><b class="${clip ? `clip${neg ? " neg" : ""}` : ""}" style="left:${neg ? z - w : z}%;width:${w}%;background:${fill[t]};--o:${neg ? "right" : "left"};animation-delay:${i * 40}ms"></b></span>
         <span class="v ${t}">${pct(v)}</span></div>`;
     }).join("")}</div>
-    <div class="perf-scale" aria-hidden="true"><span>${MINUS}${max.toFixed(1)}%</span><span>0</span><span>+${max.toFixed(1)}%</span></div>
+    <div class="perf-scale" aria-hidden="true"><span>${lo > 0 && z >= 30 ? `${MINUS}${lo.toFixed(1)}%` : ""}</span><span class="z" style="left:${z.toFixed(2)}%">0</span><span>${hi > 0 && z <= 70 ? `+${hi.toFixed(1)}%` : ""}</span></div>
   </section>`;
 }
 
 const CAT_COLOR = { Stock: "var(--cat-1)", ETF: "var(--cat-2)", "Bond ETF": "var(--cat-3)" };
+const CAT_TAG = { ETF: "ETF", "Bond ETF": "Bond" }; // stocks are the default and go untagged
 function holdingsHtml(d) {
   const rows = [...d.positions].sort((a, b) => b.market_value - a.market_value);
   const dot = `<i class="dot" aria-hidden="true"></i>`;
   return `<section class="card holdings-card"><div class="card-h"><h2>Holdings</h2><span class="aside">${finePointer ? "click" : "tap"} a row to trade</span></div>
     ${rows.length ? `<div class="holdings"><div class="h-head" aria-hidden="true"><span>Position</span><span>Value · total return</span></div>${rows.map((p) => `<button class="h-row" data-sym="${esc(p.symbol)}">
       <span class="h-main">
-        <span class="h-sym"><b><span class="sr">Trade </span>${esc(p.symbol)}</b><span>${esc(cleanName(p.name))}</span></span>
-        <span class="h-sub"><span class="cat" style="--c:${CAT_COLOR[p.category] ?? "var(--ctl)"}"><i aria-hidden="true"></i>${esc(p.category)}</span>${dot}<span>${p.weight_pct.toFixed(1)}%<span class="sh"> of equity</span></span><span class="sh">${dot}<span>${shares(p.qty)} sh</span></span>${dot}<span class="${tone(p.day_pl_pct)}">${pct(p.day_pl_pct)} today</span></span>
+        <span class="h-sym"><b><span class="sr">Trade </span>${esc(p.symbol)}</b>${CAT_TAG[p.category] ? `<i class="h-tag">${CAT_TAG[p.category]}</i>` : ""}<span class="h-name">${esc(cleanName(p.name))}</span></span>
+        <span class="h-sub"><span class="cat" style="--c:${CAT_COLOR[p.category] ?? "var(--ctl)"}"><i aria-hidden="true"></i><span class="sr">${esc(p.category)}, </span>${p.weight_pct.toFixed(1)}%<span class="sh"> of equity</span></span><span class="sh">${dot}<span>${shares(p.qty)} sh</span></span>${dot}<span class="day ${tone(p.day_pl_pct)}">${arrow(p.day_pl_pct)}${Math.abs(round(p.day_pl_pct, 2)).toFixed(2)}%<span class="mute"> today</span></span></span>
       </span>
       <span class="h-right">
         <span class="h-val" data-tick="pos:${esc(p.symbol)}" data-v="${p.market_value}">${usd(p.market_value)}</span>
-        <span class="h-pl ${tone(p.unrealized_pl)}">${sign(p.unrealized_pl)}${usd(Math.abs(p.unrealized_pl))} · ${pct(p.unrealized_pl_pct)}</span>
+        <span class="h-pl ${tone(p.unrealized_pl)}">${sign(p.unrealized_pl, 0)}${usd(Math.abs(p.unrealized_pl), 0)}<span class="sep">·</span>${pct(p.unrealized_pl_pct)}</span>
       </span>
     </button>`).join("")}</div>` : `<p class="empty">No positions yet. Claude's first run, or a tap on Trade, fills this in.</p>`}
   </section>`;
@@ -370,7 +390,7 @@ function openOrdersHtml(d) {
   if (!d.open_orders.length) return "";
   return `<section class="card orders-card"><div class="card-h"><h2>Working orders</h2><span class="aside">${d.open_orders.length}</span></div>
     ${d.open_orders.map((o) => `<div class="order"><span><b>${esc(String(o.side).toUpperCase())} ${esc(o.symbol)}</b> <span class="mute">${o.qty ? `${shares(Number(o.qty))} sh` : usd(Number(o.notional))} · ${esc(o.type)}${o.limit_price ? ` @ ${usd(Number(o.limit_price))}` : ""}</span></span>
-      <button class="chip flat" style="border:0" data-cancel="${esc(o.id)}" aria-label="Cancel ${esc(o.side)} order for ${esc(o.symbol)}">Cancel</button></div>`).join("")}
+      <button class="btn-sm" data-cancel="${esc(o.id)}" aria-label="Cancel ${esc(o.side)} order for ${esc(o.symbol)}">Cancel</button></div>`).join("")}
   </section>`;
 }
 
@@ -471,7 +491,8 @@ function renderMain(force = false) {
       <div class="col">${chartCardHtml()}${holdingsHtml(d)}</div>
       <div class="col">${openOrdersHtml(d)}${allocationHtml(d)}${performanceHtml(d)}${feedHtml()}</div>
     </div>
-    <footer class="foot"><span>Alpaca paper account · IEX data · <span id="upd">updated ${esc(clock(S.updatedAt ?? Date.now()))}${d.market.is_open ? " · live" : ""}</span></span><span>Signed in as ${esc(S.login)}</span></footer>`;
+    <footer class="foot"><span>Alpaca paper account · IEX data · <span id="upd">updated ${esc(clock(S.updatedAt ?? Date.now()))}${d.market.is_open ? " · live" : ""}</span></span><span>Signed in as ${esc(S.login)}</span></footer>
+    <div class="dock"><button class="btn" id="dock-trade">${I.trade}<span>Trade</span></button></div>`;
   if (!S.firstPaint) main.classList.add("settled");
   mountChart();
   slideTabs();
@@ -553,7 +574,9 @@ function mountChart() {
   const tagDec = 2; // same precision as the race card, so one number never reads two ways
   const tagP = pct(endP, tagDec), tagS = pct(endS, tagDec);
   const edge = W - padL; // tags and axis labels keep the same inset as the left edge, inside the card's padding
-  const tagW = Math.ceil(Math.max(tagP.length, tagS.length) * 6.7 + 12), padR = tagW + 8 + padL;
+  // Price tags are last-price labels: a notch points back at the line's end.
+  const notch = 5, tagWidth = (t) => Math.ceil(t.length * 6.6 + 14 + notch), tagShape = (w) => `M0 9.5L${notch} 0H${w}V19H${notch}Z`;
+  const tagW = tagWidth(tagP.length > tagS.length ? tagP : tagS), padR = tagW + 8 + padL;
 
   const vals = points.flatMap((p) => [p.portfolio - 100, p.spy - 100]).concat(0);
   let lo = Math.min(...vals), hi = Math.max(...vals);
@@ -572,7 +595,7 @@ function mountChart() {
   let tp = y(endP), ts = y(endS);
   if (Math.abs(tp - ts) < 20) { const mid = (tp + ts) / 2, dir = tp <= ts ? -1 : 1; tp = mid + dir * 10; ts = mid - dir * 10; }
   const tag = (ty, text, fill, ink, stroke) =>
-    `<g class="fade" transform="translate(${edge - tagW} ${ty - 9.5})"><rect width="${tagW}" height="19" rx="5" fill="${fill}" ${stroke ? `stroke="${stroke}"` : ""}/><text x="${tagW / 2}" y="13.2" text-anchor="middle" font-size="11" font-weight="500" font-family="var(--mono)" fill="${ink}">${esc(text)}</text></g>`;
+    `<g class="fade" transform="translate(${edge - tagW} ${ty - 9.5})"><path d="${tagShape(tagW)}" fill="${fill}" ${stroke ? `stroke="${stroke}"` : ""}/><text x="${(tagW + notch) / 2}" y="13.2" text-anchor="middle" font-size="11" font-weight="500" font-family="var(--mono)" fill="${ink}">${esc(text)}</text></g>`;
   const nearTag = (yy) => Math.abs(yy - tp) < 14 || Math.abs(yy - ts) < 14;
   // When the tags had to be nudged apart, a short leader ties each one back to its line's end.
   const leader = (ty, yTrue, col) => Math.abs(ty - yTrue) > 1.5
@@ -592,7 +615,7 @@ function mountChart() {
   el.setAttribute("aria-valuetext", summary);
   el.innerHTML = `<svg width="${W}" height="${H}" aria-hidden="true">
     <defs>
-      <linearGradient id="${gid}u" gradientUnits="userSpaceOnUse" x1="0" y1="${padT}" x2="0" y2="${y0}"><stop offset="0" stop-color="var(--accent)" stop-opacity=".24"/><stop offset="1" stop-color="var(--accent)" stop-opacity=".03"/></linearGradient>
+      <linearGradient id="${gid}u" gradientUnits="userSpaceOnUse" x1="0" y1="${padT}" x2="0" y2="${y0}"><stop offset="0" stop-color="var(--accent)" stop-opacity=".18"/><stop offset="1" stop-color="var(--accent)" stop-opacity=".03"/></linearGradient>
       <linearGradient id="${gid}d" gradientUnits="userSpaceOnUse" x1="0" y1="${y0}" x2="0" y2="${H - padB}"><stop offset="0" stop-color="var(--loss)" stop-opacity=".04"/><stop offset="1" stop-color="var(--loss)" stop-opacity=".2"/></linearGradient>
       <clipPath id="${gid}a"><rect x="0" y="0" width="${W}" height="${Math.max(0, y0)}"/></clipPath>
       <clipPath id="${gid}b"><rect x="0" y="${y0}" width="${W}" height="${Math.max(0, H - y0)}"/></clipPath>
@@ -600,34 +623,51 @@ function mountChart() {
     ${ticks.map((v) => {
       const yy = y(v), near = nearTag(yy);
       if (near && v !== 0) return ""; // drop the gridline and its label together; the zero line always stays
-      return `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="${v === 0 ? "var(--ctl)" : "var(--line)"}" ${v === 0 ? "" : 'stroke-dasharray="2 4"'}/>${near ? "" : `<text x="${edge}" y="${yy + 4}" text-anchor="end" font-size="11" font-family="var(--mono)" fill="var(--mute)">${v === 0 ? "0%" : pct(v, dec)}</text>`}`;
+      return `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="${v === 0 ? "var(--ctl)" : "var(--line)"}" shape-rendering="crispEdges"/>${near ? "" : `<text x="${edge}" y="${yy + 4}" text-anchor="end" font-size="11" font-family="var(--mono)" fill="var(--mute)">${v === 0 ? "0%" : pct(v, dec)}</text>`}`;
     }).join("")}
+    <path d="M${padL} ${H - padB}H${W - padR}${xl.map((i) => `M${x(i).toFixed(1)} ${H - padB}v4`).join("")}" stroke="var(--line-2)" fill="none" shape-rendering="crispEdges"/>
     <path class="fade" d="${area}" fill="url(#${gid}u)" clip-path="url(#${gid}a)"/>
     <path class="fade" d="${area}" fill="url(#${gid}d)" clip-path="url(#${gid}b)"/>
-    <path class="fade" d="${line("spy")}" fill="none" stroke="var(--spy)" stroke-width="1.5" stroke-dasharray="4 4" stroke-linejoin="round" opacity=".85"/>
-    <path class="draw" d="${line("portfolio")}" fill="none" stroke="var(--accent)" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
-    ${leader(tp, y(endP), "var(--accent)")}${leader(ts, y(endS), "var(--ctl)")}
-    <circle class="halo" cx="${x(n - 1)}" cy="${y(endP)}" r="3.5" fill="var(--accent)"/>
-    <circle class="fade" cx="${x(n - 1)}" cy="${y(endP)}" r="3.5" fill="var(--accent)"/>
-    ${tag(ts, tagS, "var(--surface-2)", "var(--ink-2)", "var(--ctl)")}
-    ${tag(tp, tagP, "var(--accent)", "var(--accent-ink)")}
+    <path class="fade" d="${line("spy")}" fill="none" stroke="var(--spy)" stroke-width="1.25" stroke-linejoin="miter" stroke-miterlimit="3" opacity=".9"/>
+    <path class="draw" d="${line("portfolio")}" fill="none" stroke="var(--accent)" stroke-width="1.75" stroke-linejoin="miter" stroke-miterlimit="3"/>
+    <g class="ends">
+      ${leader(tp, y(endP), "var(--accent)")}${leader(ts, y(endS), "var(--ctl)")}
+      <circle class="halo" cx="${x(n - 1)}" cy="${y(endP)}" r="3.5" fill="var(--accent)"/>
+      <circle class="fade" cx="${x(n - 1)}" cy="${y(endP)}" r="4" fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/>
+      ${tag(ts, tagS, "var(--surface-2)", "var(--ink-2)", "var(--ctl)")}
+      ${tag(tp, tagP, "var(--accent)", "var(--accent-ink)")}
+    </g>
     <g class="xl">${xl.map((i, k) => `<text x="${x(i)}" y="${H - 7}" font-size="11" font-family="var(--mono)" fill="var(--mute)" text-anchor="${k === 0 ? "start" : k === xl.length - 1 ? "end" : "middle"}">${esc(fmtDay(points[i].date, yr))}</text>`).join("")}</g>
-    <g id="xh" style="display:none"><line y1="${padT}" y2="${H - padB}" stroke="var(--ink-2)" stroke-width="1" opacity=".5"/><circle r="4.5" fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/><circle r="4" fill="var(--spy)" stroke="var(--surface)" stroke-width="2"/>
-      <g class="xh-pill"><rect y="${H - padB + 6}" height="19" rx="5" fill="var(--ink)"/><text y="${H - padB + 19.5}" text-anchor="middle" font-size="11" font-weight="500" font-family="var(--mono)" fill="var(--bg)"></text></g></g>
+    <g id="xh" style="display:none">
+      <line class="xv" y1="${padT}" y2="${H - padB}" stroke="var(--ink-2)" stroke-dasharray="3 3" opacity=".7" shape-rendering="crispEdges"/>
+      <line class="xz" x1="${padL}" stroke="var(--accent)" stroke-dasharray="3 3" opacity=".6" shape-rendering="crispEdges"/>
+      <circle class="cs" r="3.5" fill="var(--spy)" stroke="var(--surface)" stroke-width="2"/>
+      <circle class="cp" r="4" fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/>
+      <g class="xh-y"><path fill="var(--accent)"/><text y="13.2" text-anchor="middle" font-size="11" font-weight="500" font-family="var(--mono)" fill="var(--accent-ink)"></text></g>
+      <g class="xh-pill"><rect y="${H - padB + 6}" height="19" fill="var(--ink)"/><text y="${H - padB + 19.5}" text-anchor="middle" font-size="11" font-weight="500" font-family="var(--mono)" fill="var(--bg)"></text></g>
+    </g>
   </svg>`;
   // The line-draw animation needs the path's real length.
   el.querySelectorAll("path.draw").forEach((p) => p.style.setProperty("--len", Math.ceil(p.getTotalLength())));
   S.animateChart = false;
 
-  const svg = el.firstElementChild, xh = svg.querySelector("#xh"), [vl, c1, c2] = xh.children, xlabels = svg.querySelector(".xl");
+  const svg = el.firstElementChild, xh = svg.querySelector("#xh"), xlabels = svg.querySelector(".xl");
+  const [xv, xz, cS, cP] = [".xv", ".xz", ".cs", ".cp"].map((q) => xh.querySelector(q));
+  const yTag = xh.querySelector(".xh-y"), [yPath, yText] = yTag.children;
   const pill = xh.querySelector(".xh-pill"), pr = pill.querySelector("rect"), pt = pill.querySelector("text");
   const show = (i) => {
-    const p = points[i], cx = x(i);
+    const p = points[i], cx = x(i), cy = y(p.portfolio - 100);
     xh.style.display = "";
+    svg.classList.add("scrub"); // the last-price tags step back while the cursor's own tag is up
     xlabels.style.opacity = "0"; // the date pill takes over the axis row
-    vl.setAttribute("x1", cx); vl.setAttribute("x2", cx);
-    c1.setAttribute("cx", cx); c1.setAttribute("cy", y(p.portfolio - 100));
-    c2.setAttribute("cx", cx); c2.setAttribute("cy", y(p.spy - 100));
+    xv.setAttribute("x1", cx); xv.setAttribute("x2", cx);
+    cP.setAttribute("cx", cx); cP.setAttribute("cy", cy);
+    cS.setAttribute("cx", cx); cS.setAttribute("cy", y(p.spy - 100));
+    // Crosshair: a level line from Claude's point to a value tag on the axis.
+    const v = pct(p.portfolio - 100), yw = tagWidth(v);
+    xz.setAttribute("y1", cy); xz.setAttribute("y2", cy); xz.setAttribute("x2", edge - yw);
+    yTag.setAttribute("transform", `translate(${edge - yw} ${cy - 9.5})`);
+    yPath.setAttribute("d", tagShape(yw)); yText.setAttribute("x", (yw + notch) / 2); yText.textContent = v;
     const label = fmtDay(p.date, yr), pw = label.length * 7 + 14, px = Math.max(padL, Math.min(W - padR - pw, cx - pw / 2));
     pt.textContent = label; pt.setAttribute("x", px + pw / 2); pr.setAttribute("x", px); pr.setAttribute("width", pw);
     setReadout(p, `Equity ${usd(p.equity, 0)}`);
@@ -637,7 +677,7 @@ function mountChart() {
   };
   const hide = () => {
     clearTimeout(tapTimer);
-    xh.style.display = "none"; xlabels.style.opacity = "";
+    xh.style.display = "none"; xlabels.style.opacity = ""; svg.classList.remove("scrub");
     setReadout(null, range);
     el.setAttribute("aria-valuenow", String(n - 1)); el.setAttribute("aria-valuetext", summary);
     S.scrubbing = false;
@@ -1179,7 +1219,7 @@ function openLimits() {
       <div id="l-msg"></div>
       <div class="actions"><button class="btn" type="submit" id="l-save">Save limits</button></div>
     </form>
-    <div class="who-line"><span>Signed in as <b style="color:var(--ink);font-weight:500">${esc(S.login)}</b></span><button class="chip flat" style="border:0" id="logout">Sign out</button></div>`;
+    <div class="who-line"><span>Signed in as <b style="color:var(--ink);font-weight:500">${esc(S.login)}</b></span><button class="btn-sm" id="logout">Sign out</button></div>`;
   openSheet("sheet-limits", "#l1");
   el.querySelector("[data-close]").onclick = closeSheet;
   el.querySelector("#logout").onclick = async () => { await sb.auth.signOut({ scope: "local" }).catch(() => {}); location.reload(); };
@@ -1244,7 +1284,7 @@ function wireMain() {
       return;
     }
     if (b.id === "limits") return openLimits();
-    if (b.id === "bar-trade") return openTrade();
+    if (b.id === "bar-trade" || b.id === "dock-trade") return openTrade();
     if (b.id === "tape") {
       const now = performance.now();
       if (S.tapePaused) S.tapeT0 = now - S.tapeAt * 1000;
@@ -1347,11 +1387,11 @@ async function boot() {
   } catch (err) {
     if (S.expired) return;
     const main = document.getElementById("main");
-    main.innerHTML = `<div class="skeleton" style="text-transform:none;letter-spacing:0;font:14px var(--sans);gap:14px"><span class="loss" role="alert">${esc(err.message)}</span><button class="chip flat" style="border:0" id="retry">Try again</button></div>`;
+    main.innerHTML = `<div class="skeleton" style="text-transform:none;letter-spacing:0;font:14px var(--sans);gap:14px"><span class="loss" role="alert">${esc(err.message)}</span><button class="btn-sm" id="retry">Try again</button></div>`;
     main.querySelector("#retry").onclick = () => location.reload();
   }
 }
 boot().catch((err) => {
-  root.innerHTML = `<div class="skeleton" style="text-transform:none;letter-spacing:0;font:14px var(--sans);gap:14px"><span role="alert">${esc(err?.message || "Something went wrong.")}</span><button class="chip flat" style="border:0" id="retry">Reload</button></div>`;
+  root.innerHTML = `<div class="skeleton" style="text-transform:none;letter-spacing:0;font:14px var(--sans);gap:14px"><span role="alert">${esc(err?.message || "Something went wrong.")}</span><button class="btn-sm" id="retry">Reload</button></div>`;
   root.querySelector("#retry").onclick = () => location.reload();
 });
