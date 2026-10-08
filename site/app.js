@@ -552,7 +552,8 @@ function mountChart() {
   // Both end tags share one precision and keep their "%"; the right gutter fits the wider one.
   const tagDec = 2; // same precision as the race card, so one number never reads two ways
   const tagP = pct(endP, tagDec), tagS = pct(endS, tagDec);
-  const tagW = Math.ceil(Math.max(tagP.length, tagS.length) * 6.7 + 12), padR = tagW + 8;
+  const edge = W - padL; // tags and axis labels keep the same inset as the left edge, inside the card's padding
+  const tagW = Math.ceil(Math.max(tagP.length, tagS.length) * 6.7 + 12), padR = tagW + 8 + padL;
 
   const vals = points.flatMap((p) => [p.portfolio - 100, p.spy - 100]).concat(0);
   let lo = Math.min(...vals), hi = Math.max(...vals);
@@ -571,11 +572,11 @@ function mountChart() {
   let tp = y(endP), ts = y(endS);
   if (Math.abs(tp - ts) < 20) { const mid = (tp + ts) / 2, dir = tp <= ts ? -1 : 1; tp = mid + dir * 10; ts = mid - dir * 10; }
   const tag = (ty, text, fill, ink, stroke) =>
-    `<g class="fade" transform="translate(${W - tagW - 1} ${ty - 9.5})"><rect width="${tagW}" height="19" rx="5" fill="${fill}" ${stroke ? `stroke="${stroke}"` : ""}/><text x="${tagW / 2}" y="13.2" text-anchor="middle" font-size="11" font-weight="500" font-family="var(--mono)" fill="${ink}">${esc(text)}</text></g>`;
+    `<g class="fade" transform="translate(${edge - tagW} ${ty - 9.5})"><rect width="${tagW}" height="19" rx="5" fill="${fill}" ${stroke ? `stroke="${stroke}"` : ""}/><text x="${tagW / 2}" y="13.2" text-anchor="middle" font-size="11" font-weight="500" font-family="var(--mono)" fill="${ink}">${esc(text)}</text></g>`;
   const nearTag = (yy) => Math.abs(yy - tp) < 14 || Math.abs(yy - ts) < 14;
   // When the tags had to be nudged apart, a short leader ties each one back to its line's end.
   const leader = (ty, yTrue, col) => Math.abs(ty - yTrue) > 1.5
-    ? `<path class="fade" d="M${x(n - 1) + 4} ${yTrue.toFixed(1)}L${W - tagW - 1} ${ty.toFixed(1)}" stroke="${col}" fill="none"/>` : "";
+    ? `<path class="fade" d="M${x(n - 1) + 4} ${yTrue.toFixed(1)}L${edge - tagW} ${ty.toFixed(1)}" stroke="${col}" fill="none"/>` : "";
   const gid = `g${Math.random().toString(36).slice(2, 7)}`;
   // The fill is anchored at 0%: amber above the line of no change, a loss tint below it.
   const y0 = y(0), area = `${line("portfolio")}L${x(n - 1).toFixed(1)} ${y0.toFixed(1)}L${x(0).toFixed(1)} ${y0.toFixed(1)}Z`;
@@ -599,7 +600,7 @@ function mountChart() {
     ${ticks.map((v) => {
       const yy = y(v), near = nearTag(yy);
       if (near && v !== 0) return ""; // drop the gridline and its label together; the zero line always stays
-      return `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="${v === 0 ? "var(--ctl)" : "var(--line)"}" ${v === 0 ? "" : 'stroke-dasharray="2 4"'}/>${near ? "" : `<text x="${W - 2}" y="${yy + 4}" text-anchor="end" font-size="11" font-family="var(--mono)" fill="var(--mute)">${v === 0 ? "0%" : pct(v, dec)}</text>`}`;
+      return `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="${v === 0 ? "var(--ctl)" : "var(--line)"}" ${v === 0 ? "" : 'stroke-dasharray="2 4"'}/>${near ? "" : `<text x="${edge}" y="${yy + 4}" text-anchor="end" font-size="11" font-family="var(--mono)" fill="var(--mute)">${v === 0 ? "0%" : pct(v, dec)}</text>`}`;
     }).join("")}
     <path class="fade" d="${area}" fill="url(#${gid}u)" clip-path="url(#${gid}a)"/>
     <path class="fade" d="${area}" fill="url(#${gid}d)" clip-path="url(#${gid}b)"/>

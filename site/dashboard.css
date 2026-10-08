@@ -113,7 +113,7 @@ button { cursor: pointer; }
   z-index: 1;
   max-width: 1120px;
   margin: 0 auto;
-  padding: max(10px, env(safe-area-inset-top)) var(--gutter) calc(120px + env(safe-area-inset-bottom));
+  padding: max(10px, env(safe-area-inset-top)) var(--gutter) calc(48px + env(safe-area-inset-bottom));
 }
 
 /* Top bar ------------------------------------------------------------------ */
@@ -170,6 +170,14 @@ button { cursor: pointer; }
 .status .cd { display: none; color: var(--mute); text-transform: none; letter-spacing: 0.02em; }
 .status .cd::before { content: "·"; margin: 0 6px 0 2px; opacity: 0.6; }
 @media (min-width: 920px) { .status .cd { display: inline; } }
+/* Phones: the hero line under the equity already says when the market opens or closes, so the pill keeps
+   only its dot and the bar fits at 320px. "Offline" stays spelled out and takes the wordmark's room instead. */
+@media (max-width: 389px) {
+  .status:not(.stale) { justify-content: center; width: 30px; padding: 0; gap: 0; }
+  .status:not(.stale) .st { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .bar:has(.status.stale) .mark span { display: none; }
+}
+@media (max-width: 359px) { .bar { gap: 8px; } .mark { gap: 8px; font-size: 20px; } }
 .status.stale { color: var(--loss); border-color: color-mix(in srgb, var(--loss) 40%, transparent); }
 .status.stale i { background: var(--loss); animation: none; }
 .status.open i { background: var(--gain); box-shadow: 0 0 0 0 var(--gain); animation: pulse 2.4s var(--ease) 5; } /* a few beats, then still */
@@ -292,6 +300,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 .meta { display: flex; flex-wrap: wrap; gap: 6px 0; margin-top: 14px; font-size: 13px; color: var(--mute); }
 .meta b { font-weight: 500; font-variant-numeric: tabular-nums; }
 .meta span + span::before { content: ""; display: inline-block; width: 3px; height: 3px; margin: 0 10px 2px; border-radius: 50%; background: var(--line-2); vertical-align: middle; }
+@media (max-width: 359px) { .meta { flex-direction: column; } .meta span + span::before { display: none; } } /* stacked, not a stray leading dot */
 
 /* Layout grid -------------------------------------------------------------- */
 .top { display: grid; gap: 14px; margin-bottom: 14px; }
@@ -598,6 +607,7 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   letter-spacing: 0.04em;
   color: var(--mute);
 }
+#upd { white-space: nowrap; } /* "updated 11:12 · live" wraps as one unit */
 
 /* Sheets ------------------------------------------------------------------- */
 .scrim {
@@ -694,10 +704,12 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
 .mini-seg button:disabled, .mini-seg button[aria-disabled="true"] { opacity: 0.4; cursor: not-allowed; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .chips button {
+  flex: 1 0 auto; /* presets stretch to the row's edge; a long sell label wraps to its own row instead of clipping */
   height: 36px;
   padding: 0 13px;
   border: 1px solid var(--ctl);
   border-radius: 99px;
+  white-space: nowrap;
   background: transparent;
   color: var(--ink-2);
   font: 500 12px/1 var(--sans);
@@ -705,6 +717,8 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   transition: border-color 0.2s, color 0.2s;
 }
 .chips button:active { border-color: var(--ink); color: var(--ink); }
+.chips:has(> [data-amt]) { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); } /* four short presets: equal columns, one row */
+.chips:has(> [data-amt]) button { padding: 0 4px; }
 .btn {
   display: inline-flex;
   align-items: center;
