@@ -840,3 +840,19 @@ button.chip { height: 34px; padding: 0 12px; border: 0; cursor: pointer; }
   .plot.anim .draw { stroke-dashoffset: 0; }
   .plot.anim .fade { opacity: 1; }
 }
+
+/* telegram sheet */
+.alert.paused { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 14px; }
+.alert.paused .chip { flex-shrink: 0; white-space: nowrap; }
+.cmds { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 13px; }
+.cmds summary { cursor: pointer; font: 500 11px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--mute); padding: 4px 0 10px; }
+.cmds .order { align-items: baseline; }
+.cmds .order b { white-space: nowrap; }
+.cmds .order .mute { text-align: right; }
+#g-alerts .order:first-of-type { border-top: 0; padding-top: 2px; }
+/* Four header controls on a phone: narrow the icon buttons (tap height stays 44px) so nothing overflows down to 360px. */
+@media (max-width: 430px) {
+  .bar-right { gap: 0; }
+  .bar-right .icon-btn { width: 36px; }
+  .status { padding: 0 8px; }
+}

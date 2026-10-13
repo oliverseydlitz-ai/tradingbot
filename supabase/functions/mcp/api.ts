@@ -3,7 +3,7 @@ import type { Alpaca } from "./alpaca.ts";
 import { categorize } from "./categorize.ts";
 import { type GuardConfig, validateSettings } from "./guardrails.ts";
 import { slimOrder, submitOrder } from "./order-service.ts";
-import { REPORT_CHOICES } from "./telegram-bot.ts";
+import { publicBot, validateBotSettings } from "./telegram-bot.ts";
 import { nyDate, type Store } from "./store.ts";
 
 export interface ApiDeps {
@@ -45,7 +45,7 @@ export function createApi({ alpaca, store, getCfg, telegramEnabled = false }: Ap
     const m = req.method;
 
     if (route === "/portfolio" && m === "GET") {
-      const [account, positions, clock, openOrders, recent, cfg, mcpToday, rep] = await Promise.all([
+      const [account, positions, clock, openOrders, recent, cfg, mcpToday, bot] = await Promise.all([
         alpaca.getAccount(),
         alpaca.getPositions(),
         alpaca.getClock(),
@@ -53,7 +53,7 @@ export function createApi({ alpaca, store, getCfg, telegramEnabled = false }: Ap
         alpaca.getOrders("closed", 20),
         getCfg(),
         store.countOrdersToday(nyDate()),
-        store.getReportSchedule(),
+        store.getBotSettings(),
       ]);
       const assets = await Promise.all(positions.map((p) => alpaca.getAsset(p.symbol).catch(() => null)));
       const equity = Number(account.equity);
@@ -100,7 +100,8 @@ export function createApi({ alpaca, store, getCfg, telegramEnabled = false }: Ap
         market: { is_open: clock.is_open, next_open: clock.next_open, next_close: clock.next_close },
         open_orders: openOrders.map(slimOrder),
         recent_orders: recent.map(slimOrder),
-        settings: { ...settingsOut(cfg), reportEveryHours: rep.everyHours },
+        settings: settingsOut(cfg),
+        bot: publicBot(bot),
         telegram: { enabled: telegramEnabled },
         usage: { mcp_orders_today: mcpToday },
       });
@@ -205,23 +206,34 @@ export function createApi({ alpaca, store, getCfg, telegramEnabled = false }: Ap
       }
     }
 
-    if (route === "/settings" && m === "GET") {
-      const [cfg, rep] = await Promise.all([getCfg(), store.getReportSchedule()]);
-      return json({ settings: { ...settingsOut(cfg), reportEveryHours: rep.everyHours } });
-    }
+    if (route === "/settings" && m === "GET") return json({ settings: settingsOut(await getCfg()) });
 
     if (route === "/settings" && m === "PUT") {
-      const body = await req.json().catch(() => null);
-      const v = validateSettings(body);
+      const v = validateSettings(await req.json().catch(() => null));
       if (!v.ok) return json({ ok: false, message: v.error }, 400);
-      const every = body?.reportEveryHours === undefined ? undefined : Number(body.reportEveryHours);
-      if (every !== undefined && !(REPORT_CHOICES as readonly number[]).includes(every)) {
-        return json({ ok: false, message: "Telegram updates must be off, hourly, every 4 hours, daily or weekly." }, 400);
-      }
       await store.saveSettings(v.cfg);
-      if (every !== undefined) await store.saveReportEvery(every);
-      const rep = await store.getReportSchedule();
-      return json({ ok: true, settings: { ...settingsOut(v.cfg), reportEveryHours: rep.everyHours } });
+      return json({ ok: true, settings: settingsOut(v.cfg) });
+    }
+
+    // Telegram bot settings (partial updates) and Claude's pause switch.
+    if (route === "/bot" && m === "GET") return json({ bot: publicBot(await store.getBotSettings()), telegram: { enabled: telegramEnabled } });
+
+    if (route === "/bot" && m === "PUT") {
+      const v = validateBotSettings(await req.json().catch(() => null));
+      if (!v.ok) return json({ ok: false, message: v.error }, 400);
+      const prev = await store.getBotSettings();
+      // Turning fill pings on starts from now, not from whenever they were last on.
+      const fillReset = v.patch.notifyFills && !prev.notifyFills ? { lastFillCheck: null } : {};
+      await store.patchBotSettings({ ...v.patch, ...fillReset });
+      return json({ ok: true, bot: publicBot({ ...prev, ...v.patch }) });
+    }
+
+    if (route === "/alerts" && m === "GET") return json({ alerts: await store.listAlerts() });
+
+    if (route === "/alerts/remove" && m === "POST") {
+      const id = Number((await req.json().catch(() => null))?.id);
+      if (!Number.isInteger(id) || id <= 0) return json({ ok: false, message: "id must be a positive integer" }, 400);
+      return (await store.removeAlert(id)) ? json({ ok: true }) : json({ ok: false, message: "No such active alert." }, 404);
     }
 
     return json({ error: "not found" }, 404);

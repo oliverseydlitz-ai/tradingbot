@@ -1,6 +1,6 @@
 import { Alpaca, AlpacaError, type Order } from "./alpaca.ts";
 import { checkOrder, type GuardConfig } from "./guardrails.ts";
-import { nyDate, type Store } from "./store.ts";
+import { DEFAULT_BOT_SETTINGS, nyDate, type Store } from "./store.ts";
 import { esc, type Telegram } from "./telegram.ts";
 
 export const num = (s: string | null | undefined) => (s == null ? null : Number(s));
@@ -34,10 +34,9 @@ export type OrderOutcome =
   | { ok: true; data: { trade_id: number; orders_today: number; estimated_notional: number; order: ReturnType<typeof slimOrder> } }
   | { ok: false; kind: "guardrail" | "alpaca" | "approval"; message: string };
 
-/** Orders from Claude at or above `thresholdPct` of equity wait for a Telegram Yes/No instead of going straight out. */
+/** Telegram hookup. Orders from Claude at or above the dashboard's approval % wait for a Yes/No instead of going straight out. */
 export interface ApprovalGate {
   telegram: Telegram;
-  thresholdPct: number;
   ttlMinutes: number;
 }
 
@@ -72,7 +71,7 @@ export async function submitOrder(
     reason: a.reason,
   };
 
-  const [account, clock, positions, openOrders, ordersToday, asset] = await Promise.all([
+  const [account, clock, positions, openOrders, ordersToday, asset, bot] = await Promise.all([
     alpaca.getAccount(),
     alpaca.getClock(),
     alpaca.getPositions(),
@@ -82,6 +81,7 @@ export async function submitOrder(
       if (e instanceof AlpacaError && e.status === 404) return null;
       throw e;
     }),
+    source === "mcp" ? store.getBotSettings() : Promise.resolve(DEFAULT_BOT_SETTINGS),
   ]);
   const equity = Number(account.equity);
 
@@ -90,6 +90,9 @@ export async function submitOrder(
     return { ok: false, kind: "guardrail", message: `REJECTED by guardrail ${rule}: ${message}` };
   };
 
+  if (source === "mcp" && bot.claudePaused) {
+    return reject("PAUSED", "Oliver has paused Claude's trading (dashboard or /pause in Telegram). No orders until he resumes it.");
+  }
   if (!asset) return reject("UNKNOWN_SYMBOL", `${symbol} is not a known Alpaca asset.`);
   if (account.trading_blocked || account.account_blocked) {
     return reject("ACCOUNT_BLOCKED", "Alpaca reports trading is blocked on this account.");
@@ -130,7 +133,7 @@ export async function submitOrder(
   // Big orders from Claude wait for a Telegram Yes/No. Only orders that passed every guardrail get this far,
   // and the guardrails run again if you approve. If Telegram can't be reached, the order is NOT placed.
   const gate = deps.approval;
-  if (gate && source === "mcp" && !opts.skipApproval && equity > 0 && (verdict.notional / equity) * 100 >= gate.thresholdPct) {
+  if (gate && source === "mcp" && !opts.skipApproval && bot.approvalPct > 0 && equity > 0 && (verdict.notional / equity) * 100 >= bot.approvalPct) {
     const expiresAt = new Date(Date.now() + gate.ttlMinutes * 60_000).toISOString();
     const pct = (verdict.notional / equity) * 100;
     const id = await store.createApproval({
@@ -165,6 +168,12 @@ export async function submitOrder(
       ...(a.order_type === "limit" ? { limit_price: String(a.limit_price) } : {}),
     });
     await store.finishTrade(tradeId, { status: "accepted", alpacaOrderId: order.id });
+    // Heads-up when Claude trades on its own (an order you approved already got its own reply).
+    if (gate && source === "mcp" && !opts.skipApproval && bot.notifyClaudeTrades) {
+      await gate.telegram
+        .send(`🤖 <b>Claude: ${esc(describeOrder({ ...a, symbol }))}</b>\n~${usd(verdict.notional)} (${((verdict.notional / equity) * 100).toFixed(1)}% of equity)\n\n<b>Why:</b> ${esc(a.reason)}`)
+        .catch((e) => console.error("telegram notify failed", (e as Error).message));
+    }
     return {
       ok: true,
       data: { trade_id: tradeId, orders_today: ordersToday + (source === "mcp" ? 1 : 0), estimated_notional: verdict.notional, order: slimOrder(order) },

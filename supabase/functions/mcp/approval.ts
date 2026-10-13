@@ -26,7 +26,7 @@ export async function handleReportTick(req: Request, d: WebhookDeps): Promise<Re
   const secret = req.headers.get("x-telegram-bot-api-secret-token") ?? "";
   if (!d.webhookSecret || !safeEqual(secret, d.webhookSecret)) return new Response("forbidden", { status: 403 });
   try {
-    return Response.json({ result: await reportTick({ ...d, telegram: d.gate.telegram }) });
+    return Response.json(await reportTick({ ...d, telegram: d.gate.telegram }));
   } catch (e) {
     console.error("report tick error", (e as Error).message);
     return Response.json({ error: (e as Error).message }, { status: 500 });

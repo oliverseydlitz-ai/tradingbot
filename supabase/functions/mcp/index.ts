@@ -21,7 +21,7 @@ const allowedLogin = (Deno.env.get("ALLOWED_GITHUB_LOGIN") ?? "oliverseydlitz-ai
 
 const authClient = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
 
-// Optional: big orders from Claude wait for a Yes/No in Telegram. Needs all three secrets, else orders go straight out.
+// Optional Telegram bot (commands, alerts, Yes/No for big Claude orders; settings on the dashboard). Needs all three secrets, else orders go straight out.
 const tgToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
 const tgChat = Deno.env.get("TELEGRAM_CHAT_ID");
 const tgSecret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
@@ -29,12 +29,11 @@ const approval =
   tgToken && tgChat && tgSecret
     ? {
         telegram: new Telegram(tgToken, tgChat.trim()),
-        thresholdPct: Number(Deno.env.get("APPROVAL_THRESHOLD_PCT") ?? "5"),
         ttlMinutes: Number(Deno.env.get("APPROVAL_TTL_MINUTES") ?? "30"),
         webhookSecret: tgSecret,
       }
     : undefined;
-if (approval && !(approval.thresholdPct >= 0 && approval.ttlMinutes > 0)) throw new Error("Invalid APPROVAL_THRESHOLD_PCT / APPROVAL_TTL_MINUTES");
+if (approval && !(approval.ttlMinutes > 0)) throw new Error("Invalid APPROVAL_TTL_MINUTES");
 
 const handler = createHandler({
   approval,

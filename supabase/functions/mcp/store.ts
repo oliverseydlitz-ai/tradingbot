@@ -40,6 +40,42 @@ export interface ApprovalRow extends ApprovalInput {
   id: number;
 }
 
+export interface BotSettings {
+  /** Portfolio update cadence in hours; 0 = off. */
+  reportEveryHours: number;
+  /** Claude orders at or above this % of equity wait for a Telegram Yes/No; 0 = never ask. */
+  approvalPct: number;
+  notifyClaudeTrades: boolean;
+  notifyFills: boolean;
+  /** Ping when a holding moves this much (%) in a day; 0 = off. */
+  moverAlertPct: number;
+  /** Kill switch: Claude's place_order is rejected while true. */
+  claudePaused: boolean;
+  lastReportAt: string | null;
+  lastFillCheck: string | null;
+  moversSent: { date: string; symbols: string[] } | null;
+}
+
+export const DEFAULT_BOT_SETTINGS: BotSettings = {
+  reportEveryHours: 0,
+  approvalPct: 5,
+  notifyClaudeTrades: true,
+  notifyFills: false,
+  moverAlertPct: 0,
+  claudePaused: false,
+  lastReportAt: null,
+  lastFillCheck: null,
+  moversSent: null,
+};
+
+export interface PriceAlert {
+  id: number;
+  created_at: string;
+  symbol: string;
+  op: "above" | "below";
+  price: number;
+}
+
 /** Persistence port. The edge function uses the Postgres implementation in supabase-store.ts. */
 export interface Store {
   /** MCP (Claude) orders that consume the daily cap: pending, accepted or canceled (rejections and manual orders don't count). */
@@ -60,8 +96,12 @@ export interface Store {
   /** Atomically moves a still-pending, unexpired approval to approved/declined. Null if it was already decided or expired. */
   decideApproval(id: number, status: "approved" | "declined"): Promise<ApprovalRow | null>;
   finishApproval(id: number, patch: { status?: "failed"; result: string }): Promise<void>;
-  /** Telegram portfolio report cadence, set on the dashboard. 0 = off. */
-  getReportSchedule(): Promise<{ everyHours: number; lastAt: string | null }>;
-  saveReportEvery(hours: number): Promise<void>;
-  markReported(at: string): Promise<void>;
+  /** Telegram bot settings (dashboard) plus the bot's own bookkeeping. */
+  getBotSettings(): Promise<BotSettings>;
+  patchBotSettings(patch: Partial<BotSettings>): Promise<void>;
+  createAlert(a: { symbol: string; op: "above" | "below"; price: number }): Promise<number>;
+  listAlerts(): Promise<PriceAlert[]>;
+  /** Deactivates an active alert; false if there was none. */
+  removeAlert(id: number): Promise<boolean>;
+  markAlertTriggered(id: number, price: number): Promise<void>;
 }
