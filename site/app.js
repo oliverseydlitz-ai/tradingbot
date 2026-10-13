@@ -67,6 +67,7 @@ const RULES = {
   ASSET_CLASS: "Not a US stock or ETF", SYMBOL_ALLOWLIST: "Not on your allowlist", UNKNOWN_SYMBOL: "Unknown ticker",
   NOT_TRADABLE: "Not tradable right now", NOT_FRACTIONABLE: "Whole shares only", NO_PRICE: "No price available",
   SIZE_INPUT: "Check the order size", LIMIT_PRICE: "Check the limit price", ACCOUNT_BLOCKED: "Account is blocked",
+  PAUSED: "Claude's trading is paused",
 };
 function explain(raw) {
   const m = /^(?:REJECTED by guardrail )?([A-Z_]+): ([\s\S]*)$/.exec(String(raw ?? ""));
@@ -84,6 +85,7 @@ const I = {
   down: `<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 9.5l3.8-6H2.2z" fill="currentColor"/></svg>`,
   refresh: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v4.5h-4.5"/></svg>`,
   sliders: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2.2"/><circle cx="8" cy="17" r="2.2"/></svg>`,
+  bell: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>`,
   close: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>`,
   plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>`,
   buy: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 12.5v-9M4 7.5l4-4 4 4"/></svg>`,
@@ -192,6 +194,7 @@ function mountShell() {
     <div class="scrim" id="scrim"></div>
     <section class="sheet" id="sheet-trade" role="dialog" aria-modal="true" aria-labelledby="t-title"></section>
     <section class="sheet" id="sheet-limits" role="dialog" aria-modal="true" aria-labelledby="l-title"></section>
+    <section class="sheet" id="sheet-tg" role="dialog" aria-modal="true" aria-labelledby="g-title"></section>
     <div class="toast" id="toast" aria-hidden="true"></div>
     <div class="sr" id="live-polite" role="status" aria-live="polite"></div>
     <div class="sr" id="live-alert" role="alert"></div>`;
@@ -461,11 +464,13 @@ function renderMain(force = false) {
       <div class="bar-right">
         <span class="status ${mk.cls}" id="status" title="${esc(mk.line)}"><i></i><span class="st">${mk.chip}</span><span class="cd">${esc(mk.cd)}</span></span>
         <button class="icon-btn" id="refresh" aria-label="Refresh">${I.refresh}</button>
+        <button class="icon-btn" id="tg" aria-label="Telegram bot settings">${I.bell}</button>
         <button class="icon-btn" id="limits" aria-label="Limits and account">${I.sliders}</button>
         <button class="bar-trade" id="bar-trade" title="New trade">${I.plus}<span>Trade</span></button>
       </div>
     </header>
     ${tapeHtml(d)}
+    ${d.bot?.claudePaused ? `<div class="alert warn paused" role="status"><span><b>Claude's trading is paused.</b> Its orders are rejected until you resume. Your own trades still work.</span><button class="chip flat" style="border:0" id="resume-claude">Resume</button></div>` : ""}
     <div class="top">${heroHtml(d)}${scoreHtml()}</div>
     <div class="grid">
       <div class="col">${chartCardHtml()}${holdingsHtml(d)}</div>
@@ -1201,6 +1206,90 @@ function openLimits() {
   };
 }
 
+/* telegram bot */
+const REPORT_OPTS = [[0, "Off"], [1, "Hourly"], [4, "4 h"], [24, "Daily"], [168, "Weekly"]];
+const TG_COMMANDS = [
+  ["/portfolio", "Equity, day P&L, cash, positions"], ["/perf", "You vs SPY: today, ~1 week, 1 month"], ["/quote TSLA AAPL", "Latest prices"],
+  ["/buy 5 TSLA", "Also $500 TSLA, or 5 TSLA @ 240 for a limit"], ["/sell all TSLA", "Or a share count"], ["/orders", "Open orders"],
+  ["/cancel TSLA", "Or /cancel all"], ["/alert TSLA > 250", "Also < for below. /alerts lists, /unalert 3 removes"],
+  ["/note text", "Claude reads it on its next run"], ["/notes", "Last 5 notes"], ["/pause · /resume", "Stop or restart Claude's trading"], ["/settings", "What the bot will message you about"],
+];
+
+async function setPaused(paused) {
+  const r = await api("/bot", { method: "PUT", body: JSON.stringify({ claudePaused: paused }) });
+  if (!r.body.ok) throw new Error(r.body.message || "Could not save.");
+  S.data.bot = r.body.bot;
+  renderMain(true);
+  toast(paused ? "Claude's trading paused" : "Claude can trade again");
+}
+
+function openTelegram() {
+  const b = S.data.bot ?? {}, on = !!S.data.telegram?.enabled;
+  const el = document.getElementById("sheet-tg");
+  const seg = (id, label, opts, val, hint = "") => `<div class="field"><span class="lbl" id="${id}-l">${label}</span>
+    <div class="mini-seg" role="group" aria-labelledby="${id}-l" id="${id}">${opts.map(([v, t]) => `<button type="button" data-v="${v}" aria-pressed="${val === v}">${t}</button>`).join("")}</div>${hint ? `<div class="hint">${hint}</div>` : ""}</div>`;
+  const pctField = (id, label, v, hint) => `<div class="field"><label for="${id}">${label}</label><div class="affix"><input class="input" id="${id}" inputmode="decimal" value="${esc(v)}" autocomplete="off" enterkeyhint="next" aria-describedby="${id}-h"><span class="pre" aria-hidden="true" style="left:auto;right:14px;font:500 15px var(--sans)">%</span></div><div class="hint" id="${id}-h">${hint}</div></div>`;
+  const onOff = [[true, "On"], [false, "Off"]];
+  el.innerHTML = `<div class="grab" aria-hidden="true"></div>
+    <div class="sheet-h"><h3 id="g-title" tabindex="-1">Telegram</h3><button class="icon-btn" data-close aria-label="Close">${I.close}</button></div>
+    ${on ? `<p class="hint" style="margin-top:-6px">What the bot messages you about, and when Claude needs your OK.</p>` : `<div class="alert warn">The bot isn't set up on the server yet (missing Telegram secrets), so nothing will be sent. You can still save settings.</div>`}
+    <form id="g-form" novalidate>
+      ${seg("g-pause", "Claude's trading", [[false, "On"], [true, "Paused"]], !!b.claudePaused, "Takes effect straight away. Same as /pause and /resume.")}
+      ${pctField("g-appr", "Ask me before Claude orders of", b.approvalPct ?? 5, "Share of equity. Bigger orders wait for your Yes/No in Telegram. 0 = never ask.")}
+      ${seg("g-rep", "Portfolio updates", REPORT_OPTS, b.reportEveryHours ?? 0, "Hourly and 4 h only while the market is open.")}
+      <div class="row2">${seg("g-ct", "Claude trades", onOff, b.notifyClaudeTrades ?? true)}${seg("g-fill", "Order fills", onOff, !!b.notifyFills)}</div>
+      ${pctField("g-mov", "Big mover ping at", b.moverAlertPct ?? 0, "A holding moving this much in a day, once per stock per day. 0 = off.")}
+      <div class="field"><span class="lbl">Price alerts</span><div id="g-alerts"><div class="hint" style="margin-top:0">Loading…</div></div></div>
+      <div id="g-msg"></div>
+      <div class="actions"><button class="btn" type="submit" id="g-save">Save</button></div>
+    </form>
+    <details class="cmds"><summary>Commands</summary>${TG_COMMANDS.map(([c, t]) => `<div class="order"><b>${esc(c)}</b><span class="mute">${esc(t)}</span></div>`).join("")}</details>`;
+  openSheet("sheet-tg", "#g-title");
+  el.querySelector("[data-close]").onclick = closeSheet;
+  el.querySelectorAll(".mini-seg").forEach((g) => g.querySelectorAll("button").forEach((x) => (x.onclick = async () => {
+    g.querySelectorAll("button").forEach((y) => y.setAttribute("aria-pressed", String(y === x)));
+    if (g.id === "g-pause") {
+      try { await setPaused(x.dataset.v === "true"); } catch (err) { el.querySelector("#g-msg").innerHTML = alertHtml(err.message); }
+    }
+  })));
+  const picked = (id) => el.querySelector(`#${id} [aria-pressed="true"]`)?.dataset.v;
+
+  const alertsBox = el.querySelector("#g-alerts");
+  const drawAlerts = (list) => {
+    alertsBox.innerHTML = list.length
+      ? list.map((a) => `<div class="order"><span><b>${esc(a.symbol)}</b> <span class="mute">${a.op} ${usd(Number(a.price))}</span></span><button type="button" class="chip flat" style="border:0" data-unalert="${a.id}" aria-label="Remove ${esc(a.symbol)} ${a.op} ${esc(a.price)} alert">Remove</button></div>`).join("")
+      : `<div class="hint" style="margin-top:0">None. Add one in Telegram: <b>/alert TSLA &gt; 250</b></div>`;
+    alertsBox.querySelectorAll("[data-unalert]").forEach((x) => (x.onclick = async () => {
+      x.disabled = true;
+      const r = await api("/alerts/remove", { method: "POST", body: JSON.stringify({ id: Number(x.dataset.unalert) }) }).catch(() => null);
+      if (r?.body?.ok || r?.status === 404) drawAlerts(list.filter((a) => a.id !== Number(x.dataset.unalert)));
+      else { x.disabled = false; toast("Couldn't remove the alert", "err"); }
+    }));
+  };
+  api("/alerts", { timeout: 8000 }).then((r) => drawAlerts(r.body.alerts ?? [])).catch(() => (alertsBox.innerHTML = `<div class="hint" style="margin-top:0">Couldn't load alerts.</div>`));
+
+  el.querySelector("#g-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const save = el.querySelector("#g-save"), msg = el.querySelector("#g-msg");
+    if (save.disabled) return;
+    const num = (id) => Number(el.querySelector(id).value.trim().replace(/%$/, "") || 0);
+    save.disabled = true; save.textContent = "Saving…"; msg.innerHTML = "";
+    try {
+      const r = await api("/bot", { method: "PUT", body: JSON.stringify({
+        approvalPct: num("#g-appr"), moverAlertPct: num("#g-mov"), reportEveryHours: Number(picked("g-rep")),
+        notifyClaudeTrades: picked("g-ct") === "true", notifyFills: picked("g-fill") === "true",
+      }) });
+      if (!r.body.ok) throw new Error(r.body.message || "Could not save.");
+      S.data.bot = r.body.bot;
+      closeSheet();
+      toast("Telegram settings saved");
+    } catch (err) {
+      msg.innerHTML = alertHtml(err.message);
+      save.disabled = false; save.textContent = "Save";
+    }
+  };
+}
+
 /* ---------- data ---------- */
 async function loadHistory(period) {
   const r = await api(`/history?period=${period}`);
@@ -1243,6 +1332,12 @@ function wireMain() {
       return;
     }
     if (b.id === "limits") return openLimits();
+    if (b.id === "tg") return openTelegram();
+    if (b.id === "resume-claude") {
+      b.disabled = true;
+      try { await setPaused(false); } catch (err) { b.disabled = false; toast(err.message, "err"); }
+      return;
+    }
     if (b.id === "bar-trade") return openTrade();
     if (b.id === "tape") {
       const now = performance.now();

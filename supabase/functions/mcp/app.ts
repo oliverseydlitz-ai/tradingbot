@@ -1,7 +1,9 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { Alpaca } from "./alpaca.ts";
+import { handleReportTick, handleTelegramWebhook } from "./approval.ts";
 import { createApi } from "./api.ts";
 import type { GuardConfig } from "./guardrails.ts";
+import type { ApprovalGate } from "./order-service.ts";
 import type { Store } from "./store.ts";
 import { createServer } from "./tools.ts";
 
@@ -16,6 +18,8 @@ export interface AppDeps {
   resourceUrl: string;
   /** Supabase Auth issuer, e.g. https://<ref>.supabase.co/auth/v1 */
   authServerUrl: string;
+  /** Telegram Yes/No for big orders from Claude. Omit to place every order straight away. */
+  approval?: ApprovalGate & { webhookSecret: string };
   /** Validates a bearer token and returns the allowed identity, or null. Must enforce the single-user allowlist. */
   authenticate(token: string): Promise<{ login: string } | null>;
 }
@@ -37,7 +41,7 @@ export function createHandler(deps: AppDeps) {
   const prmUrl = `${deps.resourceUrl}/.well-known/oauth-protected-resource`;
   // Saved settings win; a DB error propagates rather than silently falling back to looser defaults.
   const getCfg = async () => (await deps.store.getSettings()) ?? deps.defaultCfg;
-  const api = createApi({ alpaca: deps.alpaca, store: deps.store, getCfg });
+  const api = createApi({ alpaca: deps.alpaca, store: deps.store, getCfg, telegramEnabled: !!deps.approval });
 
   const apiCors = (req: Request): Record<string, string> => {
     const origin = req.headers.get("origin") ?? "";
@@ -72,6 +76,13 @@ export function createHandler(deps: AppDeps) {
       }
     }
 
+    // Telegram commands, button taps and the scheduled report. Authenticated by the webhook secret (+ your chat id
+    // for messages), not a bearer token.
+    if (deps.approval && req.method === "POST" && /\/telegram(\/tick)?$/.test(pathname)) {
+      const d = { alpaca: deps.alpaca, store: deps.store, getCfg, gate: deps.approval, webhookSecret: deps.approval.webhookSecret };
+      return pathname.endsWith("/tick") ? handleReportTick(req, d) : handleTelegramWebhook(req, d);
+    }
+
     if (req.method === "OPTIONS") return withCors(new Response(null, { status: 204 }));
 
     // RFC 9728 metadata. Served here because the function can only answer under /functions/v1/mcp/*;
@@ -102,7 +113,7 @@ export function createHandler(deps: AppDeps) {
     }
 
     // Stateless: a fresh server + transport per request.
-    const server = createServer({ alpaca: deps.alpaca, store: deps.store, getCfg });
+    const server = createServer({ alpaca: deps.alpaca, store: deps.store, getCfg, approval: deps.approval });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,

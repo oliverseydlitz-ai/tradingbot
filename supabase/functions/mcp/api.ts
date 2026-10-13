@@ -3,12 +3,15 @@ import type { Alpaca } from "./alpaca.ts";
 import { categorize } from "./categorize.ts";
 import { type GuardConfig, validateSettings } from "./guardrails.ts";
 import { slimOrder, submitOrder } from "./order-service.ts";
+import { publicBot, validateBotSettings } from "./telegram-bot.ts";
 import { nyDate, type Store } from "./store.ts";
 
 export interface ApiDeps {
   alpaca: Alpaca;
   store: Store;
   getCfg: () => Promise<GuardConfig>;
+  /** Whether the Telegram bot secrets are set, so the dashboard can say so. */
+  telegramEnabled?: boolean;
 }
 
 const json = (body: unknown, status = 200) =>
@@ -36,13 +39,13 @@ const settingsOut = (c: GuardConfig) => ({
 });
 
 /** Dashboard API. The caller has already authenticated the request as the allowlisted user. */
-export function createApi({ alpaca, store, getCfg }: ApiDeps) {
+export function createApi({ alpaca, store, getCfg, telegramEnabled = false }: ApiDeps) {
   return async function handle(req: Request, route: string): Promise<Response> {
     const url = new URL(req.url);
     const m = req.method;
 
     if (route === "/portfolio" && m === "GET") {
-      const [account, positions, clock, openOrders, recent, cfg, mcpToday] = await Promise.all([
+      const [account, positions, clock, openOrders, recent, cfg, mcpToday, bot] = await Promise.all([
         alpaca.getAccount(),
         alpaca.getPositions(),
         alpaca.getClock(),
@@ -50,6 +53,7 @@ export function createApi({ alpaca, store, getCfg }: ApiDeps) {
         alpaca.getOrders("closed", 20),
         getCfg(),
         store.countOrdersToday(nyDate()),
+        store.getBotSettings(),
       ]);
       const assets = await Promise.all(positions.map((p) => alpaca.getAsset(p.symbol).catch(() => null)));
       const equity = Number(account.equity);
@@ -97,6 +101,8 @@ export function createApi({ alpaca, store, getCfg }: ApiDeps) {
         open_orders: openOrders.map(slimOrder),
         recent_orders: recent.map(slimOrder),
         settings: settingsOut(cfg),
+        bot: publicBot(bot),
+        telegram: { enabled: telegramEnabled },
         usage: { mcp_orders_today: mcpToday },
       });
     }
@@ -207,6 +213,27 @@ export function createApi({ alpaca, store, getCfg }: ApiDeps) {
       if (!v.ok) return json({ ok: false, message: v.error }, 400);
       await store.saveSettings(v.cfg);
       return json({ ok: true, settings: settingsOut(v.cfg) });
+    }
+
+    // Telegram bot settings (partial updates) and Claude's pause switch.
+    if (route === "/bot" && m === "GET") return json({ bot: publicBot(await store.getBotSettings()), telegram: { enabled: telegramEnabled } });
+
+    if (route === "/bot" && m === "PUT") {
+      const v = validateBotSettings(await req.json().catch(() => null));
+      if (!v.ok) return json({ ok: false, message: v.error }, 400);
+      const prev = await store.getBotSettings();
+      // Turning fill pings on starts from now, not from whenever they were last on.
+      const fillReset = v.patch.notifyFills && !prev.notifyFills ? { lastFillCheck: null } : {};
+      await store.patchBotSettings({ ...v.patch, ...fillReset });
+      return json({ ok: true, bot: publicBot({ ...prev, ...v.patch }) });
+    }
+
+    if (route === "/alerts" && m === "GET") return json({ alerts: await store.listAlerts() });
+
+    if (route === "/alerts/remove" && m === "POST") {
+      const id = Number((await req.json().catch(() => null))?.id);
+      if (!Number.isInteger(id) || id <= 0) return json({ ok: false, message: "id must be a positive integer" }, 400);
+      return (await store.removeAlert(id)) ? json({ ok: true }) : json({ ok: false, message: "No such active alert." }, 404);
     }
 
     return json({ error: "not found" }, 404);

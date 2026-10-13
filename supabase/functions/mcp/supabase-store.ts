@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import type { GuardConfig } from "./guardrails.ts";
-import type { NoteInput, Store, TradeRow } from "./store.ts";
+import { type ApprovalInput, type ApprovalRow, type BotSettings, DEFAULT_BOT_SETTINGS, type NoteInput, type PriceAlert, type Store, type TradeRow } from "./store.ts";
 
 const fail = (op: string, error: { message: string } | null) => {
   if (error) throw new Error(`db ${op}: ${error.message}`);
@@ -106,6 +106,107 @@ export function supabaseStore(url: string, serviceKey: string): Store {
       const { data, error } = await q;
       fail("list notes", error);
       return data ?? [];
+    },
+    async createApproval(a: ApprovalInput) {
+      const { data, error } = await db
+        .from("approvals")
+        .insert({
+          symbol: a.symbol,
+          side: a.side,
+          order_type: a.orderType,
+          qty: a.qty,
+          notional: a.notional,
+          limit_price: a.limitPrice,
+          reason: a.reason,
+          est_notional: a.estNotional,
+          equity_at_time: a.equity,
+          expires_at: a.expiresAt,
+        })
+        .select("id")
+        .single();
+      fail("create approval", error);
+      return data!.id as number;
+    },
+    async decideApproval(id, status) {
+      const { data, error } = await db
+        .from("approvals")
+        .update({ status, decided_at: new Date().toISOString() })
+        .eq("id", id)
+        .eq("status", "pending")
+        .gt("expires_at", new Date().toISOString())
+        .select("*")
+        .maybeSingle();
+      fail("decide approval", error);
+      if (!data) return null;
+      return {
+        id: data.id,
+        symbol: data.symbol,
+        side: data.side,
+        orderType: data.order_type,
+        qty: data.qty,
+        notional: data.notional,
+        limitPrice: data.limit_price,
+        reason: data.reason,
+        estNotional: data.est_notional,
+        equity: data.equity_at_time,
+        expiresAt: data.expires_at,
+      } satisfies ApprovalRow;
+    },
+    async finishApproval(id, patch) {
+      const { error } = await db.from("approvals").update({ ...(patch.status ? { status: patch.status } : {}), result: patch.result }).eq("id", id);
+      fail("finish approval", error);
+    },
+    async getBotSettings() {
+      const { data, error } = await db.from("settings").select("*").eq("id", 1).maybeSingle();
+      fail("bot settings", error);
+      if (!data) return { ...DEFAULT_BOT_SETTINGS };
+      return {
+        reportEveryHours: data.report_every_hours,
+        approvalPct: data.approval_pct,
+        notifyClaudeTrades: data.notify_claude_trades,
+        notifyFills: data.notify_fills,
+        moverAlertPct: data.mover_alert_pct,
+        claudePaused: data.claude_paused,
+        lastReportAt: data.last_report_at,
+        lastFillCheck: data.last_fill_check,
+        moversSent: data.movers_sent,
+      } satisfies BotSettings;
+    },
+    async patchBotSettings(p) {
+      const cols: Record<string, unknown> = { id: 1 };
+      const map: Record<keyof BotSettings, string> = {
+        reportEveryHours: "report_every_hours",
+        approvalPct: "approval_pct",
+        notifyClaudeTrades: "notify_claude_trades",
+        notifyFills: "notify_fills",
+        moverAlertPct: "mover_alert_pct",
+        claudePaused: "claude_paused",
+        lastReportAt: "last_report_at",
+        lastFillCheck: "last_fill_check",
+        moversSent: "movers_sent",
+      };
+      for (const [k, v] of Object.entries(p)) if (v !== undefined) cols[map[k as keyof BotSettings]] = v;
+      const { error } = await db.from("settings").upsert(cols);
+      fail("save bot settings", error);
+    },
+    async createAlert(a) {
+      const { data, error } = await db.from("alerts").insert(a).select("id").single();
+      fail("create alert", error);
+      return data!.id as number;
+    },
+    async listAlerts() {
+      const { data, error } = await db.from("alerts").select("id, created_at, symbol, op, price").eq("active", true).order("id");
+      fail("list alerts", error);
+      return (data ?? []) as PriceAlert[];
+    },
+    async removeAlert(id) {
+      const { data, error } = await db.from("alerts").update({ active: false }).eq("id", id).eq("active", true).select("id");
+      fail("remove alert", error);
+      return !!data?.length;
+    },
+    async markAlertTriggered(id, price) {
+      const { error } = await db.from("alerts").update({ active: false, triggered_at: new Date().toISOString(), triggered_price: price }).eq("id", id);
+      fail("trigger alert", error);
     },
   };
 }

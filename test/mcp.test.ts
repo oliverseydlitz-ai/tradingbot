@@ -3,7 +3,9 @@ import { Alpaca } from "../supabase/functions/mcp/alpaca.ts";
 import { createHandler } from "../supabase/functions/mcp/app.ts";
 import { allowedGithubLogin } from "../supabase/functions/mcp/auth.ts";
 import { parseConfig, type GuardConfig } from "../supabase/functions/mcp/guardrails.ts";
-import { nyDate, type Store, type TradeRow } from "../supabase/functions/mcp/store.ts";
+import { Telegram } from "../supabase/functions/mcp/telegram.ts";
+import { parseTrade } from "../supabase/functions/mcp/telegram-bot.ts";
+import { type ApprovalInput, type BotSettings, DEFAULT_BOT_SETTINGS, nyDate, type PriceAlert, type Store, type TradeRow } from "../supabase/functions/mcp/store.ts";
 
 const URL_BASE = "https://ref.supabase.co/functions/v1/mcp";
 
@@ -12,6 +14,9 @@ function memStore() {
   let settings: GuardConfig | null = null;
   const notes: { id: number; created_at: string; note_date: string; title: string | null; tags: string[]; body: string }[] = [];
   const snapshots: Record<string, unknown> = {};
+  const bot: BotSettings = { ...DEFAULT_BOT_SETTINGS };
+  const alerts: (PriceAlert & { active: boolean; triggeredPrice?: number })[] = [];
+  const approvals: (ApprovalInput & { id: number; status: string; result?: string })[] = [];
   const store: Store = {
     countOrdersToday: async (d) => trades.filter((t) => t.date === d && t.source === "mcp" && ["pending", "accepted", "canceled"].includes(t.status)).length,
     insertTrade: async (date, t) => (trades.push({ ...t, id: trades.length + 1, date }), trades.length),
@@ -23,11 +28,29 @@ function memStore() {
     getSettings: async () => settings,
     saveSettings: async (c) => void (settings = c),
     listTrades: async (limit, symbol) => trades.filter((t) => !symbol || t.symbol === symbol).slice().reverse().slice(0, limit),
+    createApproval: async (a) => (approvals.push({ ...a, id: approvals.length + 1, status: "pending" }), approvals.length),
+    decideApproval: async (id, status) => {
+      const a = approvals.find((x) => x.id === id);
+      if (!a || a.status !== "pending" || Date.parse(a.expiresAt) <= Date.now()) return null;
+      a.status = status;
+      return a;
+    },
+    getBotSettings: async () => ({ ...bot }),
+    patchBotSettings: async (p) => void Object.assign(bot, Object.fromEntries(Object.entries(p).filter(([, v]) => v !== undefined))),
+    createAlert: async (a) => (alerts.push({ ...a, id: alerts.length + 1, created_at: new Date().toISOString(), active: true }), alerts.length),
+    listAlerts: async () => alerts.filter((a) => a.active).map(({ active, triggeredPrice, ...a }) => a),
+    removeAlert: async (id) => {
+      const a = alerts.find((x) => x.id === id && x.active);
+      if (a) a.active = false;
+      return !!a;
+    },
+    markAlertTriggered: async (id, price) => void Object.assign(alerts[id - 1], { active: false, triggeredPrice: price }),
+    finishApproval: async (id, p) => void Object.assign(approvals[id - 1], { ...(p.status ? { status: p.status } : {}), result: p.result }),
   };
-  return { store, trades, snapshots, notes };
+  return { store, trades, snapshots, notes, approvals, bot, alerts };
 }
 
-const mk = (authenticate = async (t: string) => (t === "good" ? { login: "oliver" } : null)) => {
+const mk = (authenticate = async (t: string) => (t === "good" ? { login: "oliver" } : null), withApproval = false) => {
   const m = memStore();
   const handler = createHandler({
     store: m.store,
@@ -37,6 +60,7 @@ const mk = (authenticate = async (t: string) => (t === "good" ? { login: "oliver
     resourceUrl: URL_BASE,
     authServerUrl: "https://ref.supabase.co/auth/v1",
     authenticate,
+    approval: withApproval ? { telegram: new Telegram("tok", "4242"), ttlMinutes: 30, webhookSecret: "whsec" } : undefined,
   });
   return { ...m, handler };
 };
@@ -48,6 +72,11 @@ const account = { equity: "100000", last_equity: "99000", cash: "100000", buying
 let positions: any[] = [];
 const NAMES: Record<string, string> = { SPY: "SPDR S&P 500 ETF Trust", TLT: "iShares 20+ Year Treasury Bond ETF", AAPL: "Apple Inc. Common Stock" };
 const placed: any[] = [];
+const telegram: { method: string; body: any }[] = [];
+let telegramDown = false;
+let openOrders: any[] = [];
+let closedOrders: any[] = [];
+const canceled: string[] = [];
 function alpacaFetch(input: any, init?: any) {
   const url = new URL(typeof input === "string" ? input : input.url);
   const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status });
@@ -62,7 +91,11 @@ function alpacaFetch(input: any, init?: any) {
       return json({ id: crypto.randomUUID(), ...body, status: "accepted", filled_qty: "0", qty: body.qty ?? null, notional: body.notional ?? null, limit_price: body.limit_price ?? null, filled_avg_price: null, created_at: "", submitted_at: "", filled_at: null });
     }
     if (p === "/v2/account/portfolio/history") return json({ timestamp: [1790000000, 1790086400, 1790172800], equity: [100000, 101000, 102000], base_value: 100000 });
-    if (p === "/v2/orders") return json([]);
+    if (p === "/v2/orders") return json(url.searchParams.get("status") === "closed" ? closedOrders : url.searchParams.get("status") === "open" ? openOrders : []);
+    if (p.startsWith("/v2/orders/") && init?.method === "DELETE") {
+      canceled.push(p.split("/").pop()!);
+      return new Response(null, { status: 204 });
+    }
     if (p.startsWith("/v2/assets/")) {
       const s = p.split("/").pop()!;
       if (s === "NOPE") return json({ message: "asset not found" }, 404);
@@ -81,6 +114,13 @@ function alpacaFetch(input: any, init?: any) {
   if (url.hostname === "data.alpaca.markets" && url.pathname === "/v2/stocks/bars") {
     const days = [0, 1, 2].map((i) => new Date(1790000000 * 1000 + i * 86400_000));
     return json({ bars: { SPY: days.map((d, i) => ({ t: d.toISOString(), o: 1, h: 1, l: 1, c: 700 + i * 7, v: 1 })) } });
+  }
+  if (url.hostname === "api.telegram.org") {
+    const method = url.pathname.split("/").pop()!;
+    const body = JSON.parse(init.body);
+    telegram.push({ method, body });
+    if (telegramDown) return json({ ok: false, description: "Bad Gateway" }, 502);
+    return json({ ok: true, result: method === "sendMessage" ? { message_id: 77 } : true });
   }
   return json({ message: `unmocked ${url}` }, 500);
 }
@@ -134,6 +174,8 @@ describe("tools (mocked Alpaca + in-memory store)", () => {
     market = { is_open: true };
     positions = [];
     placed.length = 0;
+    telegram.length = 0;
+    telegramDown = false;
   });
 
   it("lists all eleven tools", async () => {
@@ -328,5 +370,357 @@ describe("dashboard API", () => {
   it("gives Claude no way to change its own limits", async () => {
     const { body } = await rpc(mk().handler, "tools/list", {});
     expect(body.result.tools.map((t: any) => t.name).join(",")).not.toMatch(/setting|limit/i);
+  });
+});
+
+describe("Telegram approval for big orders", () => {
+  beforeAll(() => void vi.stubGlobal("fetch", vi.fn(alpacaFetch)));
+  afterEach(() => {
+    market = { is_open: true };
+    placed.length = 0;
+    telegram.length = 0;
+    telegramDown = false;
+  });
+  const tap = (h: (r: Request) => Promise<Response>, data: string, o: { secret?: string; from?: number; chat?: number } = {}) =>
+    h(
+      new Request(`${URL_BASE}/telegram`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-telegram-bot-api-secret-token": o.secret ?? "whsec" },
+        body: JSON.stringify({ callback_query: { id: "cb1", data, from: { id: o.from ?? 4242 }, message: { message_id: 77, chat: { id: o.chat ?? 4242 } } } }),
+      }),
+    );
+  const big = { symbol: "SPY", side: "buy", qty: 60, reason: "Rotating into the benchmark on a pullback" }; // $6,000 = 6% of equity
+  const small = { ...big, qty: 40 }; // 4%
+
+  it("holds a big order, messages Telegram, and places nothing yet", async () => {
+    const { handler, trades, approvals } = mk(undefined, true);
+    const r = await call(handler, "place_order", big);
+    expect(r.isError).toBe(false);
+    expect(r.text).toMatch(/PENDING APPROVAL \(#1\)/);
+    expect(placed).toHaveLength(0);
+    expect(trades).toHaveLength(0);
+    expect(approvals[0]).toMatchObject({ symbol: "SPY", qty: 60, status: "pending" });
+    expect(telegram[0].method).toBe("sendMessage");
+    expect(telegram[0].body.chat_id).toBe("4242");
+    expect(telegram[0].body.reply_markup.inline_keyboard[0].map((b: any) => b.callback_data)).toEqual(["a:1", "r:1"]);
+  });
+
+  it("sends small orders straight through, and everything straight through when Telegram isn't configured", async () => {
+    const gated = mk(undefined, true);
+    expect((await call(gated.handler, "place_order", small)).isError).toBe(false);
+    expect(placed).toHaveLength(1);
+    expect(telegram.filter((t) => t.body.reply_markup)).toHaveLength(0); // just the "Claude traded" ping, no Yes/No
+    expect((await call(mk().handler, "place_order", big)).isError).toBe(false);
+    expect(placed).toHaveLength(2);
+  });
+
+  it("still applies the guardrails before asking you", async () => {
+    const { handler, approvals } = mk(undefined, true);
+    market = { is_open: false };
+    expect((await call(handler, "place_order", big)).text).toMatch(/MARKET_CLOSED/);
+    expect(approvals).toHaveLength(0);
+    expect(telegram).toHaveLength(0);
+  });
+
+  it("Yes places the order once (double tap does nothing), logs it, and edits the message", async () => {
+    const { handler, trades } = mk(undefined, true);
+    await call(handler, "place_order", big);
+    expect((await tap(handler, "a:1")).status).toBe(200);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]).toMatchObject({ symbol: "SPY", side: "buy", qty: "60" });
+    expect(trades[0]).toMatchObject({ status: "accepted", source: "mcp" });
+    expect(trades[0].reason).toMatch(/approved via Telegram #1/);
+    expect(telegram.find((t) => t.method === "editMessageText")!.body.text).toMatch(/Placed #1/);
+    await tap(handler, "a:1");
+    expect(placed).toHaveLength(1);
+  });
+
+  it("No places nothing, and a later Yes on the same request does nothing", async () => {
+    const { handler, approvals } = mk(undefined, true);
+    await call(handler, "place_order", big);
+    await tap(handler, "r:1");
+    await tap(handler, "a:1");
+    expect(placed).toHaveLength(0);
+    expect(approvals[0].status).toBe("declined");
+  });
+
+  it("re-checks the guardrails at approval time (market closed by then)", async () => {
+    const { handler, approvals } = mk(undefined, true);
+    await call(handler, "place_order", big);
+    market = { is_open: false };
+    await tap(handler, "a:1");
+    expect(placed).toHaveLength(0);
+    expect(approvals[0].status).toBe("failed");
+    expect(telegram.find((t) => t.method === "editMessageText")!.body.text).toMatch(/NOT placed/);
+  });
+
+  it("expired requests can't be approved", async () => {
+    const { handler, approvals } = mk(undefined, true);
+    await call(handler, "place_order", big);
+    approvals[0].expiresAt = new Date(Date.now() - 1000).toISOString();
+    await tap(handler, "a:1");
+    expect(placed).toHaveLength(0);
+  });
+
+  it("ignores wrong secret, other chats and other users", async () => {
+    const { handler } = mk(undefined, true);
+    await call(handler, "place_order", big);
+    expect((await tap(handler, "a:1", { secret: "nope" })).status).toBe(403);
+    await tap(handler, "a:1", { from: 999 });
+    await tap(handler, "a:1", { chat: 999 });
+    expect(placed).toHaveLength(0);
+  });
+
+  it("fails closed when Telegram is down: nothing is placed and Claude is told", async () => {
+    const { handler, approvals } = mk(undefined, true);
+    telegramDown = true;
+    const r = await call(handler, "place_order", big);
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/NOT PLACED/);
+    expect(placed).toHaveLength(0);
+    expect(approvals[0].status).toBe("failed");
+  });
+});
+
+describe("Telegram commands and scheduled reports", () => {
+  beforeAll(() => void vi.stubGlobal("fetch", vi.fn(alpacaFetch)));
+  afterEach(() => {
+    market = { is_open: true };
+    positions = [];
+    placed.length = 0;
+    telegram.length = 0;
+  });
+  const say = async (h: (r: Request) => Promise<Response>, text: string, from = 4242) => {
+    telegram.length = 0;
+    const res = await h(
+      new Request(`${URL_BASE}/telegram`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-telegram-bot-api-secret-token": "whsec" },
+        body: JSON.stringify({ message: { message_id: 1, text, from: { id: from }, chat: { id: from } } }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    return telegram.find((t) => t.method === "sendMessage")?.body.text as string | undefined;
+  };
+  const tick = (h: (r: Request) => Promise<Response>, secret = "whsec") =>
+    h(new Request(`${URL_BASE}/telegram/tick`, { method: "POST", headers: { "x-telegram-bot-api-secret-token": secret } }));
+
+  it("parses trade sizes", () => {
+    expect(parseTrade("5 TSLA")).toEqual({ ok: true, symbol: "TSLA", qty: 5, limit: undefined });
+    expect(parseTrade("tsla 5")).toMatchObject({ ok: true, symbol: "TSLA", qty: 5 });
+    expect(parseTrade("$1,500 TSLA")).toMatchObject({ ok: true, symbol: "TSLA", notional: 1500 });
+    expect(parseTrade("5 TSLA @ 240.5")).toMatchObject({ ok: true, qty: 5, limit: 240.5 });
+    expect(parseTrade("5 TSLA limit 240")).toMatchObject({ ok: true, qty: 5, limit: 240 });
+    expect(parseTrade("all TSLA")).toMatchObject({ ok: true, all: true });
+    expect(parseTrade("$500 TSLA @ 240").ok).toBe(false);
+    expect(parseTrade("TSLA").ok).toBe(false);
+    expect(parseTrade("-5 TSLA").ok).toBe(false);
+  });
+
+  it("/buy places a manual order through the guardrails", async () => {
+    const { handler, trades } = mk(undefined, true);
+    expect(await say(handler, "/buy 5 SPY")).toMatch(/✅ BUY 5 SPY/);
+    expect(placed[0]).toMatchObject({ symbol: "SPY", side: "buy", qty: "5", type: "market" });
+    expect(trades[0]).toMatchObject({ source: "manual", status: "accepted", reason: "Telegram: /buy 5 SPY" });
+    expect(await say(handler, "/buy@MyBot $500 SPY")).toMatch(/✅/);
+    expect(placed[1]).toMatchObject({ notional: "500" });
+    market = { is_open: false };
+    expect(await say(handler, "/buy 5 SPY")).toMatch(/Not placed.*MARKET_CLOSED/);
+    expect(placed).toHaveLength(2);
+  });
+
+  it("/sell all sells the whole position; can't sell what you don't hold", async () => {
+    const { handler } = mk(undefined, true);
+    expect(await say(handler, "/sell all SPY")).toMatch(/don't hold SPY/);
+    positions = [{ symbol: "SPY", qty: "12.5", market_value: "1250", side: "long", avg_entry_price: "100", current_price: "100", unrealized_pl: "0", unrealized_plpc: "0", unrealized_intraday_pl: "0" }];
+    expect(await say(handler, "/sell all SPY")).toMatch(/✅ SELL 12.5 SPY/);
+    expect(placed[0]).toMatchObject({ side: "sell", qty: "12.5" });
+  });
+
+  it("/note saves a note Claude reads via get_notes; /notes lists them", async () => {
+    const { handler, notes } = mk(undefined, true);
+    expect(await say(handler, "/note Trim NVDA if it pops on earnings")).toMatch(/Saved note #1/);
+    expect(notes[0]).toMatchObject({ body: "Trim NVDA if it pops on earnings", tags: ["telegram", "oliver"] });
+    expect((await call(handler, "get_notes", {})).text).toMatch(/Trim NVDA/);
+    expect(await say(handler, "/notes")).toMatch(/#1.*\n.*Trim NVDA/);
+  });
+
+  it("/portfolio reports equity, cash and positions; /help and unknown commands show help", async () => {
+    const { handler } = mk(undefined, true);
+    positions = [{ symbol: "SPY", qty: "10", market_value: "1000", side: "long", avg_entry_price: "90", current_price: "100", unrealized_pl: "100", unrealized_plpc: "0.111", unrealized_intraday_pl: "5", unrealized_intraday_plpc: "0.005" }];
+    const r = await say(handler, "/portfolio");
+    expect(r).toMatch(/Equity \$100,000\.00/);
+    expect(r).toMatch(/Cash \$100,000\.00/);
+    expect(r).toMatch(/SPY.*\$1,000\.00.*\+11\.10% total/);
+    expect(await say(handler, "/help")).toMatch(/\/buy 5 TSLA/);
+    expect(await say(handler, "/wat")).toMatch(/Unknown command/);
+  });
+
+  it("ignores messages from anyone else", async () => {
+    const { handler } = mk(undefined, true);
+    expect(await say(handler, "/buy 5 SPY", 999)).toBeUndefined();
+    expect(placed).toHaveLength(0);
+  });
+
+  it("report tick follows the dashboard setting and only sends when due", async () => {
+    const { handler, bot } = mk(undefined, true);
+    const rep = async () => (await (await tick(handler)).json()).report;
+    expect((await tick(handler, "nope")).status).toBe(403);
+    expect(await rep()).toBe("off");
+    bot.reportEveryHours = 1;
+    expect(await rep()).toBe("sent");
+    expect(telegram.find((t) => t.method === "sendMessage")!.body.text).toMatch(/Hourly update/);
+    expect(await rep()).toBe("not_due");
+    bot.lastReportAt = new Date(Date.now() - 3600_000).toISOString();
+    market = { is_open: false };
+    expect(await rep()).toBe("market_closed"); // hourly waits for the open
+    bot.reportEveryHours = 24;
+    bot.lastReportAt = new Date(Date.now() - 24 * 3600_000 + 2 * 60_000).toISOString(); // a couple of minutes early is fine
+    expect(await rep()).toBe("sent"); // daily goes out even when closed
+  });
+});
+
+describe("Telegram bot extras and dashboard bot settings", () => {
+  beforeAll(() => void vi.stubGlobal("fetch", vi.fn(alpacaFetch)));
+  afterEach(() => {
+    market = { is_open: true };
+    positions = [];
+    placed.length = 0;
+    telegram.length = 0;
+    openOrders = [];
+    closedOrders = [];
+    canceled.length = 0;
+  });
+  const say = async (h: (r: Request) => Promise<Response>, text: string) => {
+    telegram.length = 0;
+    await h(
+      new Request(`${URL_BASE}/telegram`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-telegram-bot-api-secret-token": "whsec" },
+        body: JSON.stringify({ message: { message_id: 1, text, from: { id: 4242 }, chat: { id: 4242 } } }),
+      }),
+    );
+    return telegram.filter((t) => t.method === "sendMessage").map((t) => t.body.text as string).join("\n---\n");
+  };
+  const tick = async (h: (r: Request) => Promise<Response>) => {
+    telegram.length = 0;
+    const res = await h(new Request(`${URL_BASE}/telegram/tick`, { method: "POST", headers: { "x-telegram-bot-api-secret-token": "whsec" } }));
+    return { result: await res.json(), sent: telegram.filter((t) => t.method === "sendMessage").map((t) => t.body.text as string) };
+  };
+  const api = (h: (r: Request) => Promise<Response>, method: string, route: string, body?: unknown) =>
+    h(new Request(`${URL_BASE}/api${route}`, { method, headers: { authorization: "Bearer good", "content-type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) }));
+  const pos = (symbol: string, intraday: number) => ({ symbol, qty: "10", market_value: "1000", side: "long", avg_entry_price: "100", current_price: "100", unrealized_pl: "0", unrealized_plpc: "0", unrealized_intraday_pl: "0", unrealized_intraday_plpc: String(intraday) });
+
+  it("/pause blocks Claude's orders (logged as PAUSED) but not yours; /resume lifts it", async () => {
+    const { handler, trades, bot } = mk(undefined, true);
+    expect(await say(handler, "/pause")).toMatch(/paused/);
+    expect(bot.claudePaused).toBe(true);
+    expect((await call(handler, "place_order", { symbol: "SPY", side: "buy", qty: 1, reason: "should be blocked by pause" })).text).toMatch(/PAUSED/);
+    expect(trades[0]).toMatchObject({ status: "rejected" });
+    expect(await say(handler, "/buy 1 SPY")).toMatch(/✅/);
+    await say(handler, "/resume");
+    expect((await call(handler, "place_order", { symbol: "SPY", side: "buy", qty: 1, reason: "allowed again after resume" })).isError).toBe(false);
+    expect(placed).toHaveLength(2);
+  });
+
+  it("approval threshold comes from the dashboard setting; 0 means never ask", async () => {
+    const { handler, bot } = mk(undefined, true);
+    bot.approvalPct = 2;
+    expect((await call(handler, "place_order", { symbol: "SPY", side: "buy", qty: 30, reason: "three percent order now gated" })).text).toMatch(/PENDING APPROVAL/);
+    bot.approvalPct = 0;
+    expect((await call(handler, "place_order", { symbol: "SPY", side: "buy", qty: 90, reason: "nine percent order never gated" })).isError).toBe(false);
+    expect(placed).toHaveLength(1);
+  });
+
+  it("pings you when Claude trades, with its reason, unless switched off", async () => {
+    const { handler, bot } = mk(undefined, true);
+    await call(handler, "place_order", { symbol: "SPY", side: "buy", qty: 10, reason: "Adding to core on weakness" });
+    const ping = telegram.find((t) => t.method === "sendMessage")!.body.text;
+    expect(ping).toMatch(/Claude: BUY 10 SPY/);
+    expect(ping).toMatch(/Adding to core on weakness/);
+    telegram.length = 0;
+    bot.notifyClaudeTrades = false;
+    await call(handler, "place_order", { symbol: "SPY", side: "buy", qty: 10, reason: "Adding to core on weakness" });
+    expect(telegram).toHaveLength(0);
+  });
+
+  it("price alerts: create, list, trigger once while open, remove", async () => {
+    const { handler, alerts } = mk(undefined, true);
+    expect(await say(handler, "/alert SPY > 99.5")).toMatch(/Alert #1: SPY above \$99\.50/);
+    expect(await say(handler, "/alert spy below 50")).toMatch(/Alert #2/);
+    expect(await say(handler, "/alert NOPE > 5")).toMatch(/isn't a known ticker/);
+    expect(await say(handler, "/alert SPY")).toMatch(/Usage/);
+    expect(await say(handler, "/alerts")).toMatch(/#1 SPY above \$99\.50\n#2 SPY below \$50\.00/);
+    market = { is_open: false };
+    expect((await tick(handler)).result.alerts).toBe("market_closed");
+    market = { is_open: true };
+    const t = await tick(handler); // fake SPY trades at 100
+    expect(t.result.alerts).toBe("sent");
+    expect(t.sent.join()).toMatch(/SPY \$100\.00.*above your \$99\.50/);
+    expect(alerts[0]).toMatchObject({ active: false, triggeredPrice: 100 });
+    expect((await tick(handler)).result.alerts).toBe("none"); // fires once
+    expect(await say(handler, "/unalert 2")).toMatch(/Removed alert #2/);
+    expect(await say(handler, "/unalert 2")).toMatch(/No active alert/);
+  });
+
+  it("big mover pings go out once per symbol per day", async () => {
+    const { handler, bot } = mk(undefined, true);
+    expect((await tick(handler)).result.movers).toBe("off");
+    bot.moverAlertPct = 3;
+    positions = [pos("AAPL", -0.042), pos("SPY", 0.01)];
+    const t = await tick(handler);
+    expect(t.result.movers).toBe("sent");
+    expect(t.sent.join()).toMatch(/AAPL.*−4\.20%/);
+    expect(t.sent.join()).not.toMatch(/SPY/);
+    expect((await tick(handler)).result.movers).toBe("none");
+    positions = [pos("AAPL", -0.05), pos("SPY", 0.035)];
+    const t2 = await tick(handler);
+    expect(t2.sent.join()).toMatch(/SPY/);
+    expect(t2.sent.join()).not.toMatch(/AAPL/);
+  });
+
+  it("fill pings start from when they're switched on and don't repeat", async () => {
+    const { handler, bot } = mk(undefined, true);
+    closedOrders = [{ id: "o0", symbol: "SPY", side: "buy", status: "filled", filled_qty: "3", filled_avg_price: "100.5", filled_at: new Date(Date.now() - 3600_000).toISOString() }];
+    expect((await api(handler, "PUT", "/bot", { notifyFills: true })).status).toBe(200);
+    expect((await tick(handler)).sent).toHaveLength(0); // old fill is not replayed
+    closedOrders.unshift({ id: "o1", symbol: "AAPL", side: "sell", status: "filled", filled_qty: "2", filled_avg_price: "190", filled_at: new Date(Date.now() + 1000).toISOString() });
+    closedOrders.unshift({ id: "o2", symbol: "TLT", side: "buy", status: "canceled", filled_qty: "0", filled_avg_price: null, filled_at: null });
+    const t = await tick(handler);
+    expect(t.sent.join()).toMatch(/SELL 2 AAPL @ \$190\.00/);
+    expect(t.sent.join()).not.toMatch(/TLT|SPY/);
+    expect((await tick(handler)).sent).toHaveLength(0);
+    expect(bot.lastFillCheck).toBeTruthy();
+  });
+
+  it("/quote, /perf, /cancel, /settings", async () => {
+    const { handler } = mk(undefined, true);
+    expect(await say(handler, "/quote spy aapl")).toMatch(/SPY.*\$100\.00 \(\+1\.01% today\)\n.*AAPL/);
+    expect(await say(handler, "/quote")).toMatch(/Usage/);
+    expect(await say(handler, "/perf")).toMatch(/You vs SPY[\s\S]*Today: you \+1\.01%/);
+    openOrders = [{ id: "a1", symbol: "SPY" }, { id: "a2", symbol: "AAPL" }];
+    expect(await say(handler, "/cancel SPY")).toMatch(/Canceled 1 order\./);
+    expect(canceled).toEqual(["a1"]);
+    expect(await say(handler, "/cancel all")).toMatch(/Canceled 2 orders/);
+    expect(await say(handler, "/settings")).toMatch(/Ask before Claude orders: ≥ 5% of equity[\s\S]*Fill pings: off/);
+  });
+
+  it("dashboard reads and saves bot settings, validates them, and manages alerts", async () => {
+    const { handler, bot } = mk(undefined, true);
+    const got = await (await api(handler, "GET", "/bot")).json();
+    expect(got).toEqual({ bot: { reportEveryHours: 0, approvalPct: 5, notifyClaudeTrades: true, notifyFills: false, moverAlertPct: 0, claudePaused: false }, telegram: { enabled: true } });
+    const saved = await (await api(handler, "PUT", "/bot", { reportEveryHours: 24, approvalPct: 7.5, moverAlertPct: 4, claudePaused: true, lastReportAt: "hacked" })).json();
+    expect(saved.bot).toMatchObject({ reportEveryHours: 24, approvalPct: 7.5, moverAlertPct: 4, claudePaused: true });
+    expect(bot.lastReportAt).toBeNull(); // bookkeeping isn't writable from the API
+    expect((await api(handler, "PUT", "/bot", { reportEveryHours: 3 })).status).toBe(400);
+    expect((await api(handler, "PUT", "/bot", { approvalPct: 101 })).status).toBe(400);
+    expect((await api(handler, "PUT", "/bot", { notifyFills: "yes" })).status).toBe(400);
+    const pf = await (await api(handler, "GET", "/portfolio")).json();
+    expect(pf.bot).toMatchObject({ reportEveryHours: 24, claudePaused: true });
+    await say(handler, "/alert SPY > 500");
+    expect((await (await api(handler, "GET", "/alerts")).json()).alerts).toMatchObject([{ id: 1, symbol: "SPY", op: "above", price: 500 }]);
+    expect((await api(handler, "POST", "/alerts/remove", { id: 1 })).status).toBe(200);
+    expect((await api(handler, "POST", "/alerts/remove", { id: 1 })).status).toBe(404);
+    expect((await api(handler, "GET", "/bot", undefined).then((r) => r.status))).toBe(200);
   });
 });

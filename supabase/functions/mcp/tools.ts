@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Alpaca } from "./alpaca.ts";
 import type { GuardConfig } from "./guardrails.ts";
-import { slimOrder, submitOrder } from "./order-service.ts";
+import { type ApprovalGate, slimOrder, submitOrder } from "./order-service.ts";
 import { nyDate, type Store } from "./store.ts";
 
 const text = (v: unknown, isError = false) => ({
@@ -18,9 +18,11 @@ export interface ToolDeps {
   store: Store;
   /** Resolves the limits in force right now (dashboard-edited settings, else defaults). */
   getCfg: () => Promise<GuardConfig>;
+  /** When set, big orders wait for a Telegram Yes/No. */
+  approval?: ApprovalGate;
 }
 
-export function createServer({ alpaca, store, getCfg }: ToolDeps) {
+export function createServer({ alpaca, store, getCfg, approval }: ToolDeps) {
   const server = new McpServer({ name: "portfolio-mcp", version: "0.2.0" });
   const readOnly = { readOnlyHint: true, openWorldHint: true };
 
@@ -156,7 +158,7 @@ export function createServer({ alpaca, store, getCfg }: ToolDeps) {
     {
       title: "Place order",
       description:
-        "Place a PAPER order for a US equity/ETF (long-only, day orders). Provide exactly one of qty (shares, fractional allowed for market orders) or notional (dollars, market orders only). Limit orders need qty and limit_price. A non-empty 'reason' (why you are making this trade) is REQUIRED and is logged. Server-side guardrails reject: market closed, short selling, margin/insufficient cash, order > 10% of equity (buys), position > 20% of equity after the order, more than 10 orders per day, non-equity assets. A rejection message names the rule that fired; do not retry the same order unchanged.",
+        "Place a PAPER order for a US equity/ETF (long-only, day orders). Provide exactly one of qty (shares, fractional allowed for market orders) or notional (dollars, market orders only). Limit orders need qty and limit_price. A non-empty 'reason' (why you are making this trade) is REQUIRED and is logged. Server-side guardrails reject: market closed, short selling, margin/insufficient cash, order > 10% of equity (buys), position > 20% of equity after the order, more than 10 orders per day, non-equity assets. While Oliver has paused your trading, every order is rejected with PAUSED. Large orders (a share of equity he sets) are held for Oliver's Yes/No on Telegram: you get back PENDING APPROVAL, the order is not placed yet, and you must not resubmit it. A rejection message names the rule that fired; do not retry the same order unchanged.",
       inputSchema: {
         symbol: symbolSchema,
         side: z.enum(["buy", "sell"]),
@@ -170,11 +172,12 @@ export function createServer({ alpaca, store, getCfg }: ToolDeps) {
     },
     async (a) => {
       const r = await submitOrder(
-        { alpaca, store, cfg: await getCfg() },
+        { alpaca, store, cfg: await getCfg(), approval },
         { ...a, symbol: sym(a.symbol) },
         "mcp",
       );
-      return r.ok ? text(r.data) : text(r.message, true);
+      if (r.ok) return text(r.data);
+      return text(r.message, r.kind !== "approval" || r.message.startsWith("NOT PLACED"));
     },
   );
 

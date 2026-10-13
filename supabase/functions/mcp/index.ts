@@ -3,6 +3,7 @@ import { Alpaca } from "./alpaca.ts";
 import { createHandler } from "./app.ts";
 import { allowedGithubLogin } from "./auth.ts";
 import { parseConfig } from "./guardrails.ts";
+import { Telegram } from "./telegram.ts";
 import { supabaseStore } from "./supabase-store.ts";
 
 declare const Deno: { env: { get(k: string): string | undefined }; serve(h: (r: Request) => Response | Promise<Response>): void };
@@ -20,7 +21,22 @@ const allowedLogin = (Deno.env.get("ALLOWED_GITHUB_LOGIN") ?? "oliverseydlitz-ai
 
 const authClient = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
 
+// Optional Telegram bot (commands, alerts, Yes/No for big Claude orders; settings on the dashboard). Needs all three secrets, else orders go straight out.
+const tgToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
+const tgChat = Deno.env.get("TELEGRAM_CHAT_ID");
+const tgSecret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
+const approval =
+  tgToken && tgChat && tgSecret
+    ? {
+        telegram: new Telegram(tgToken, tgChat.trim()),
+        ttlMinutes: Number(Deno.env.get("APPROVAL_TTL_MINUTES") ?? "30"),
+        webhookSecret: tgSecret,
+      }
+    : undefined;
+if (approval && !(approval.ttlMinutes > 0)) throw new Error("Invalid APPROVAL_TTL_MINUTES");
+
 const handler = createHandler({
+  approval,
   store: supabaseStore(supabaseUrl, serviceKey),
   alpaca: new Alpaca({ keyId: Deno.env.get("ALPACA_KEY_ID") ?? "", secretKey: Deno.env.get("ALPACA_SECRET_KEY") ?? "" }),
   siteOrigins: ["https://portfolio.oliverseydlitz.com"],
