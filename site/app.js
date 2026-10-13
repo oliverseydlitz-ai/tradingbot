@@ -1162,6 +1162,7 @@ async function findOrder(body, known) {
 }
 
 /* limits & account */
+const REPORT_OPTS = [[0, "Off"], [1, "Hourly"], [4, "4 h"], [24, "Daily"], [168, "Weekly"]];
 function openLimits() {
   const s = S.data.settings, used = S.data.usage.mcp_orders_today;
   const el = document.getElementById("sheet-limits");
@@ -1175,10 +1176,14 @@ function openLimits() {
         <div class="meter" aria-hidden="true"><i style="width:${Math.min(100, (used / Math.max(1, s.maxOrdersPerDay)) * 100)}%"></i></div>
         <div class="hint" id="l3-h">${esc(used)} used today. Your own trades don't count.</div></div>
       <div class="field"><label for="l4">Symbol allowlist</label><input class="input" id="l4" value="${esc(s.allowlist.join(", "))}" placeholder="Empty means any US stock or ETF" autocapitalize="characters" autocorrect="off" spellcheck="false" autocomplete="off" enterkeyhint="done"></div>
+      <div class="field"><span class="lbl" id="l5-l">Telegram updates</span>
+        <div class="mini-seg" role="group" aria-labelledby="l5-l" id="l5">${REPORT_OPTS.map(([h, t]) => `<button type="button" data-every="${h}" aria-pressed="${(s.reportEveryHours ?? 0) === h}">${t}</button>`).join("")}</div>
+        <div class="hint">${S.data.telegram?.enabled ? "Hourly and 4-hour updates only go out while the market is open." : "The Telegram bot isn't set up on the server yet, so nothing will be sent."}</div></div>
       <div id="l-msg"></div>
       <div class="actions"><button class="btn" type="submit" id="l-save">Save limits</button></div>
     </form>
     <div class="who-line"><span>Signed in as <b style="color:var(--ink);font-weight:500">${esc(S.login)}</b></span><button class="chip flat" style="border:0" id="logout">Sign out</button></div>`;
+  el.querySelectorAll("#l5 button").forEach((b) => (b.onclick = () => el.querySelectorAll("#l5 button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)))));
   openSheet("sheet-limits", "#l1");
   el.querySelector("[data-close]").onclick = closeSheet;
   el.querySelector("#logout").onclick = async () => { await sb.auth.signOut({ scope: "local" }).catch(() => {}); location.reload(); };
@@ -1189,11 +1194,11 @@ function openLimits() {
     const v = (id) => el.querySelector(id).value.trim();
     save.disabled = true; save.textContent = "Saving…"; msg.innerHTML = "";
     try {
-      const r = await api("/settings", { method: "PUT", body: JSON.stringify({ maxOrderPct: v("#l1"), maxPositionPct: v("#l2"), maxOrdersPerDay: v("#l3"), allowlist: v("#l4") }) });
+      const r = await api("/settings", { method: "PUT", body: JSON.stringify({ maxOrderPct: v("#l1"), maxPositionPct: v("#l2"), maxOrdersPerDay: v("#l3"), allowlist: v("#l4"), reportEveryHours: Number(el.querySelector('#l5 [aria-pressed="true"]')?.dataset.every ?? 0) }) });
       if (!r.body.ok) throw new Error(r.body.message || "Could not save.");
       S.data.settings = r.body.settings;
       closeSheet();
-      toast("Limits saved");
+      toast("Settings saved");
     } catch (err) {
       msg.innerHTML = alertHtml(err.message);
       save.disabled = false; save.textContent = "Save limits";

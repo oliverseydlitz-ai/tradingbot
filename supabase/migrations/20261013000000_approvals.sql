@@ -19,3 +19,8 @@ create table public.approvals (
 
 alter table public.approvals enable row level security;
 revoke all on public.approvals from anon, authenticated;
+
+-- Telegram portfolio report cadence, set on the dashboard (0 = off).
+alter table public.settings
+  add column report_every_hours int not null default 0 check (report_every_hours in (0, 1, 4, 24, 168)),
+  add column last_report_at timestamptz;

@@ -156,5 +156,18 @@ export function supabaseStore(url: string, serviceKey: string): Store {
       const { error } = await db.from("approvals").update({ ...(patch.status ? { status: patch.status } : {}), result: patch.result }).eq("id", id);
       fail("finish approval", error);
     },
+    async getReportSchedule() {
+      const { data, error } = await db.from("settings").select("report_every_hours, last_report_at").eq("id", 1).maybeSingle();
+      fail("report schedule", error);
+      return { everyHours: data?.report_every_hours ?? 0, lastAt: data?.last_report_at ?? null };
+    },
+    async saveReportEvery(hours) {
+      const { error } = await db.from("settings").upsert({ id: 1, report_every_hours: hours });
+      fail("save report schedule", error);
+    },
+    async markReported(at) {
+      const { error } = await db.from("settings").upsert({ id: 1, last_report_at: at });
+      fail("mark reported", error);
+    },
   };
 }

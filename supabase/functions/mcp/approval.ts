@@ -3,6 +3,7 @@ import type { GuardConfig } from "./guardrails.ts";
 import { type ApprovalGate, describeOrder, submitOrder } from "./order-service.ts";
 import type { Store } from "./store.ts";
 import { esc } from "./telegram.ts";
+import { handleCommand, reportTick } from "./telegram-bot.ts";
 
 export interface WebhookDeps {
   alpaca: Alpaca;
@@ -20,8 +21,20 @@ const safeEqual = (a: string, b: string) => {
   return d === 0;
 };
 
+/** Scheduler endpoint (pg_cron). Same secret header as the webhook. */
+export async function handleReportTick(req: Request, d: WebhookDeps): Promise<Response> {
+  const secret = req.headers.get("x-telegram-bot-api-secret-token") ?? "";
+  if (!d.webhookSecret || !safeEqual(secret, d.webhookSecret)) return new Response("forbidden", { status: 403 });
+  try {
+    return Response.json({ result: await reportTick({ ...d, telegram: d.gate.telegram }) });
+  } catch (e) {
+    console.error("report tick error", (e as Error).message);
+    return Response.json({ error: (e as Error).message }, { status: 500 });
+  }
+}
+
 /**
- * Telegram webhook. Anything that isn't from Telegram (wrong secret) or isn't a tap by your own chat is ignored.
+ * Telegram webhook: commands typed in your chat, and Yes/No taps on approval requests. Anything that isn't from Telegram (wrong secret) or isn't a tap by your own chat is ignored.
  * Always answers 200 once authenticated so Telegram doesn't retry; a decision is claimed atomically, so a retry or
  * double tap can never place an order twice.
  */
@@ -30,9 +43,25 @@ export async function handleTelegramWebhook(req: Request, d: WebhookDeps): Promi
   if (!d.webhookSecret || !safeEqual(secret, d.webhookSecret)) return new Response("forbidden", { status: 403 });
 
   const update = await req.json().catch(() => null);
+  const tg = d.gate.telegram;
+
+  const msg = update?.message;
+  if (msg && typeof msg.text === "string") {
+    // Only your own private chat with the bot.
+    if (String(msg.from?.id) !== tg.chatId || String(msg.chat?.id) !== tg.chatId) return new Response("ok");
+    let out: string;
+    try {
+      out = await handleCommand(msg.text, { ...d, telegram: tg });
+    } catch (e) {
+      console.error("telegram command error", (e as Error).message);
+      out = `⚠️ Error: ${esc((e as Error).message)}`;
+    }
+    await tg.send(out).catch((e) => console.error("telegram send failed", (e as Error).message));
+    return new Response("ok");
+  }
+
   const cb = update?.callback_query;
   const m = /^([ar]):(\d+)$/.exec(cb?.data ?? "");
-  const tg = d.gate.telegram;
   if (!cb || !m || String(cb.from?.id) !== tg.chatId || String(cb.message?.chat?.id) !== tg.chatId) {
     return new Response("ok");
   }

@@ -4,6 +4,7 @@ import { createHandler } from "../supabase/functions/mcp/app.ts";
 import { allowedGithubLogin } from "../supabase/functions/mcp/auth.ts";
 import { parseConfig, type GuardConfig } from "../supabase/functions/mcp/guardrails.ts";
 import { Telegram } from "../supabase/functions/mcp/telegram.ts";
+import { parseTrade } from "../supabase/functions/mcp/telegram-bot.ts";
 import { type ApprovalInput, nyDate, type Store, type TradeRow } from "../supabase/functions/mcp/store.ts";
 
 const URL_BASE = "https://ref.supabase.co/functions/v1/mcp";
@@ -13,6 +14,7 @@ function memStore() {
   let settings: GuardConfig | null = null;
   const notes: { id: number; created_at: string; note_date: string; title: string | null; tags: string[]; body: string }[] = [];
   const snapshots: Record<string, unknown> = {};
+  const report = { everyHours: 0, lastAt: null as string | null };
   const approvals: (ApprovalInput & { id: number; status: string; result?: string })[] = [];
   const store: Store = {
     countOrdersToday: async (d) => trades.filter((t) => t.date === d && t.source === "mcp" && ["pending", "accepted", "canceled"].includes(t.status)).length,
@@ -32,9 +34,12 @@ function memStore() {
       a.status = status;
       return a;
     },
+    getReportSchedule: async () => ({ ...report }),
+    saveReportEvery: async (h) => void (report.everyHours = h),
+    markReported: async (at) => void (report.lastAt = at),
     finishApproval: async (id, p) => void Object.assign(approvals[id - 1], { ...(p.status ? { status: p.status } : {}), result: p.result }),
   };
-  return { store, trades, snapshots, notes, approvals };
+  return { store, trades, snapshots, notes, approvals, report };
 }
 
 const mk = (authenticate = async (t: string) => (t === "good" ? { login: "oliver" } : null), withApproval = false) => {
@@ -333,7 +338,7 @@ describe("dashboard API", () => {
     expect((await api(handler, "PUT", "/settings", { maxOrderPct: 10, maxPositionPct: 20, maxOrdersPerDay: 0, allowlist: "" })).status).toBe(400);
     expect((await api(handler, "PUT", "/settings", { maxOrderPct: 10, maxPositionPct: 20, maxOrdersPerDay: 10, allowlist: "SPY, $$$" })).status).toBe(400);
     const saved = await api(handler, "PUT", "/settings", { maxOrderPct: 1, maxPositionPct: 5, maxOrdersPerDay: 2, allowlist: "spy, qqq" });
-    expect(saved.body.settings).toEqual({ maxOrderPct: 1, maxPositionPct: 5, maxOrdersPerDay: 2, allowlist: ["SPY", "QQQ"] });
+    expect(saved.body.settings).toEqual({ maxOrderPct: 1, maxPositionPct: 5, maxOrdersPerDay: 2, allowlist: ["SPY", "QQQ"], reportEveryHours: 0 });
     expect((await call(handler, "place_order", { symbol: "SPY", side: "buy", qty: 20, reason: "now over the 1 percent cap" })).text).toMatch(/MAX_ORDER_PCT/);
     expect((await call(handler, "place_order", { symbol: "AAPL", side: "buy", qty: 1, reason: "not on the allowlist" })).text).toMatch(/SYMBOL_ALLOWLIST/);
   });
@@ -459,5 +464,117 @@ describe("Telegram approval for big orders", () => {
     expect(r.text).toMatch(/NOT PLACED/);
     expect(placed).toHaveLength(0);
     expect(approvals[0].status).toBe("failed");
+  });
+});
+
+describe("Telegram commands and scheduled reports", () => {
+  beforeAll(() => void vi.stubGlobal("fetch", vi.fn(alpacaFetch)));
+  afterEach(() => {
+    market = { is_open: true };
+    positions = [];
+    placed.length = 0;
+    telegram.length = 0;
+  });
+  const say = async (h: (r: Request) => Promise<Response>, text: string, from = 4242) => {
+    telegram.length = 0;
+    const res = await h(
+      new Request(`${URL_BASE}/telegram`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-telegram-bot-api-secret-token": "whsec" },
+        body: JSON.stringify({ message: { message_id: 1, text, from: { id: from }, chat: { id: from } } }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    return telegram.find((t) => t.method === "sendMessage")?.body.text as string | undefined;
+  };
+  const tick = (h: (r: Request) => Promise<Response>, secret = "whsec") =>
+    h(new Request(`${URL_BASE}/telegram/tick`, { method: "POST", headers: { "x-telegram-bot-api-secret-token": secret } }));
+
+  it("parses trade sizes", () => {
+    expect(parseTrade("5 TSLA")).toEqual({ ok: true, symbol: "TSLA", qty: 5, limit: undefined });
+    expect(parseTrade("tsla 5")).toMatchObject({ ok: true, symbol: "TSLA", qty: 5 });
+    expect(parseTrade("$1,500 TSLA")).toMatchObject({ ok: true, symbol: "TSLA", notional: 1500 });
+    expect(parseTrade("5 TSLA @ 240.5")).toMatchObject({ ok: true, qty: 5, limit: 240.5 });
+    expect(parseTrade("5 TSLA limit 240")).toMatchObject({ ok: true, qty: 5, limit: 240 });
+    expect(parseTrade("all TSLA")).toMatchObject({ ok: true, all: true });
+    expect(parseTrade("$500 TSLA @ 240").ok).toBe(false);
+    expect(parseTrade("TSLA").ok).toBe(false);
+    expect(parseTrade("-5 TSLA").ok).toBe(false);
+  });
+
+  it("/buy places a manual order through the guardrails", async () => {
+    const { handler, trades } = mk(undefined, true);
+    expect(await say(handler, "/buy 5 SPY")).toMatch(/✅ BUY 5 SPY/);
+    expect(placed[0]).toMatchObject({ symbol: "SPY", side: "buy", qty: "5", type: "market" });
+    expect(trades[0]).toMatchObject({ source: "manual", status: "accepted", reason: "Telegram: /buy 5 SPY" });
+    expect(await say(handler, "/buy@MyBot $500 SPY")).toMatch(/✅/);
+    expect(placed[1]).toMatchObject({ notional: "500" });
+    market = { is_open: false };
+    expect(await say(handler, "/buy 5 SPY")).toMatch(/Not placed.*MARKET_CLOSED/);
+    expect(placed).toHaveLength(2);
+  });
+
+  it("/sell all sells the whole position; can't sell what you don't hold", async () => {
+    const { handler } = mk(undefined, true);
+    expect(await say(handler, "/sell all SPY")).toMatch(/don't hold SPY/);
+    positions = [{ symbol: "SPY", qty: "12.5", market_value: "1250", side: "long", avg_entry_price: "100", current_price: "100", unrealized_pl: "0", unrealized_plpc: "0", unrealized_intraday_pl: "0" }];
+    expect(await say(handler, "/sell all SPY")).toMatch(/✅ SELL 12.5 SPY/);
+    expect(placed[0]).toMatchObject({ side: "sell", qty: "12.5" });
+  });
+
+  it("/note saves a note Claude reads via get_notes; /notes lists them", async () => {
+    const { handler, notes } = mk(undefined, true);
+    expect(await say(handler, "/note Trim NVDA if it pops on earnings")).toMatch(/Saved note #1/);
+    expect(notes[0]).toMatchObject({ body: "Trim NVDA if it pops on earnings", tags: ["telegram", "oliver"] });
+    expect((await call(handler, "get_notes", {})).text).toMatch(/Trim NVDA/);
+    expect(await say(handler, "/notes")).toMatch(/#1.*\n.*Trim NVDA/);
+  });
+
+  it("/portfolio reports equity, cash and positions; /help and unknown commands show help", async () => {
+    const { handler } = mk(undefined, true);
+    positions = [{ symbol: "SPY", qty: "10", market_value: "1000", side: "long", avg_entry_price: "90", current_price: "100", unrealized_pl: "100", unrealized_plpc: "0.111", unrealized_intraday_pl: "5", unrealized_intraday_plpc: "0.005" }];
+    const r = await say(handler, "/portfolio");
+    expect(r).toMatch(/Equity \$100,000\.00/);
+    expect(r).toMatch(/Cash \$100,000\.00/);
+    expect(r).toMatch(/SPY.*\$1,000\.00.*\+11\.10% total/);
+    expect(await say(handler, "/help")).toMatch(/\/buy 5 TSLA/);
+    expect(await say(handler, "/wat")).toMatch(/Unknown command/);
+  });
+
+  it("ignores messages from anyone else", async () => {
+    const { handler } = mk(undefined, true);
+    expect(await say(handler, "/buy 5 SPY", 999)).toBeUndefined();
+    expect(placed).toHaveLength(0);
+  });
+
+  it("report tick follows the dashboard setting and only sends when due", async () => {
+    const { handler, report } = mk(undefined, true);
+    expect((await tick(handler, "nope")).status).toBe(403);
+    expect(await (await tick(handler)).json()).toEqual({ result: "off" });
+    report.everyHours = 1;
+    expect(await (await tick(handler)).json()).toEqual({ result: "sent" });
+    expect(telegram.find((t) => t.method === "sendMessage")!.body.text).toMatch(/Hourly update/);
+    expect(await (await tick(handler)).json()).toEqual({ result: "not_due" });
+    report.lastAt = new Date(Date.now() - 3600_000).toISOString();
+    market = { is_open: false };
+    expect(await (await tick(handler)).json()).toEqual({ result: "market_closed" }); // hourly waits for the open
+    report.everyHours = 24;
+    report.lastAt = new Date(Date.now() - 24 * 3600_000 + 5 * 60_000).toISOString(); // a few minutes early is fine
+    expect(await (await tick(handler)).json()).toEqual({ result: "sent" }); // daily goes out even when closed
+  });
+
+  it("the dashboard saves the report cadence and rejects odd values", async () => {
+    const { handler, report } = mk(undefined, true);
+    const put = (body: unknown) =>
+      handler(new Request(`${URL_BASE}/api/settings`, { method: "PUT", headers: { authorization: "Bearer good", "content-type": "application/json" }, body: JSON.stringify(body) }));
+    const base = { maxOrderPct: 10, maxPositionPct: 20, maxOrdersPerDay: 10, allowlist: "" };
+    const ok = await put({ ...base, reportEveryHours: 4 });
+    expect((await ok.json()).settings.reportEveryHours).toBe(4);
+    expect(report.everyHours).toBe(4);
+    expect((await put({ ...base, reportEveryHours: 3 })).status).toBe(400);
+    expect(report.everyHours).toBe(4);
+    const pf = await (await handler(new Request(`${URL_BASE}/api/portfolio`, { headers: { authorization: "Bearer good" } }))).json();
+    expect(pf.settings.reportEveryHours).toBe(4);
+    expect(pf.telegram).toEqual({ enabled: true });
   });
 });

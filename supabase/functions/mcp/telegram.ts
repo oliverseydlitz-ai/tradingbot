@@ -16,6 +16,10 @@ export class Telegram {
     return j.result;
   }
 
+  send(html: string) {
+    return this.call("sendMessage", { chat_id: this.chatId, text: html, parse_mode: "HTML", link_preview_options: { is_disabled: true } });
+  }
+
   /** Sends a message with Yes/No buttons; returns the Telegram message id. */
   async askApproval(approvalId: number, html: string): Promise<number> {
     const m = await this.call("sendMessage", {

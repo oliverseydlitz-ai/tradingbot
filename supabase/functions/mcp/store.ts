@@ -60,4 +60,8 @@ export interface Store {
   /** Atomically moves a still-pending, unexpired approval to approved/declined. Null if it was already decided or expired. */
   decideApproval(id: number, status: "approved" | "declined"): Promise<ApprovalRow | null>;
   finishApproval(id: number, patch: { status?: "failed"; result: string }): Promise<void>;
+  /** Telegram portfolio report cadence, set on the dashboard. 0 = off. */
+  getReportSchedule(): Promise<{ everyHours: number; lastAt: string | null }>;
+  saveReportEvery(hours: number): Promise<void>;
+  markReported(at: string): Promise<void>;
 }

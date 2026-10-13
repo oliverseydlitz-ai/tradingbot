@@ -32,9 +32,42 @@ Setup: talk to @BotFather → `/newbot` for the token; message your bot once, th
 ```sh
 curl "https://api.telegram.org/bot<TOKEN>/setWebhook" \
   -d url="https://kdbmfnybaqcgluxqhntp.supabase.co/functions/v1/mcp/telegram" \
-  -d secret_token="<TELEGRAM_WEBHOOK_SECRET>" -d allowed_updates='["callback_query"]'
+  -d secret_token="<TELEGRAM_WEBHOOK_SECRET>" -d allowed_updates='["message","callback_query"]'
 ```
-Only taps from your chat id with the right secret header are acted on.
+Only messages and taps from your chat id with the right secret header are acted on.
+
+### Commands
+| Command | Does |
+|---|---|
+| `/portfolio` (or `/status`) | Equity, day P&L, cash, positions with weight and P&L |
+| `/buy 5 TSLA`, `/buy $500 TSLA`, `/buy 5 TSLA @ 240` | Market by shares, market by dollars, limit |
+| `/sell 5 TSLA`, `/sell all TSLA` | Same, `all` sells the whole position |
+| `/orders` | Open orders |
+| `/note text` | Saves a note (tags `telegram`, `oliver`). Claude reads it with `get_notes` on its next run; it shows on the dashboard |
+| `/notes` | Last 5 notes |
+
+Telegram trades go straight out (no confirm step) through the same guardrails as dashboard trades, logged as `source = manual` with the command as the reason. Optional, for the command menu in Telegram:
+```sh
+curl "https://api.telegram.org/bot<TOKEN>/setMyCommands" -H 'content-type: application/json' -d '{"commands":[
+ {"command":"portfolio","description":"Portfolio state"},{"command":"buy","description":"/buy 5 TSLA"},
+ {"command":"sell","description":"/sell 5 TSLA"},{"command":"orders","description":"Open orders"},
+ {"command":"note","description":"Leave Claude a note"},{"command":"notes","description":"Recent notes"}]}'
+```
+
+### Scheduled portfolio updates
+Pick the cadence on the dashboard (Limits sheet → Telegram updates: off, hourly, 4 h, daily, weekly). Hourly and 4 h only send while the market is open. A pg_cron job pings the function every 15 minutes and it decides whether one is due. Run once in the SQL editor:
+```sql
+create extension if not exists pg_cron;
+create extension if not exists pg_net;
+select vault.create_secret('<TELEGRAM_WEBHOOK_SECRET>', 'telegram_webhook_secret');
+select cron.schedule('telegram-report', '*/15 * * * *', $$
+  select net.http_post(
+    url := 'https://kdbmfnybaqcgluxqhntp.supabase.co/functions/v1/mcp/telegram/tick',
+    headers := jsonb_build_object('x-telegram-bot-api-secret-token',
+      (select decrypted_secret from vault.decrypted_secrets where name = 'telegram_webhook_secret'))
+  )
+$$);
+```
 
 ## Dashboard
 Sign in with GitHub (same allowlist). It shows equity vs SPY (indexed), allocation (stocks / ETFs / bond ETFs / cash), best and worst
