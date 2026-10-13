@@ -28,7 +28,7 @@ When Claude's `place_order` is at or above the approval threshold (dashboard →
 - Fails closed: if the Telegram message can't be sent, nothing is placed. Manual dashboard orders and orders under the threshold are unaffected.
 - Optional: with no Telegram secrets set, every order goes straight out as before, and nothing is messaged.
 
-Setup: talk to @BotFather → `/newbot` for the token; message your bot once, then read your chat id from `https://api.telegram.org/bot<TOKEN>/getUpdates`. Set the function secrets `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_WEBHOOK_SECRET` (any long random string; Telegram allows `A-Za-z0-9_-`), optionally `APPROVAL_TTL_MINUTES` (default 30), apply `migrations/20261013000000_approvals.sql` and `migrations/20261013010000_bot_settings.sql`, redeploy, then register the webhook once:
+Setup: talk to @BotFather → `/newbot` for the token; message your bot once, then read your chat id from `https://api.telegram.org/bot<TOKEN>/getUpdates`. Store `telegram_bot_token`, `telegram_chat_id` and `telegram_webhook_secret` in Vault (`select vault.create_secret('<value>', '<name>')`; the function reads them through `public.telegram_config()`, and Vault wins over function secrets), or set the function secrets `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_WEBHOOK_SECRET` (any long random string; Telegram allows `A-Za-z0-9_-`), optionally `APPROVAL_TTL_MINUTES` (default 30), apply `migrations/20261013000000_approvals.sql` and `migrations/20261013010000_bot_settings.sql`, redeploy, then register the webhook once:
 ```sh
 curl "https://api.telegram.org/bot<TOKEN>/setWebhook" \
   -d url="https://kdbmfnybaqcgluxqhntp.supabase.co/functions/v1/mcp/telegram" \

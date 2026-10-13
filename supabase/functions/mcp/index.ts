@@ -21,14 +21,19 @@ const allowedLogin = (Deno.env.get("ALLOWED_GITHUB_LOGIN") ?? "oliverseydlitz-ai
 
 const authClient = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
 
-// Optional Telegram bot (commands, alerts, Yes/No for big Claude orders; settings on the dashboard). Needs all three secrets, else orders go straight out.
-const tgToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
-const tgChat = Deno.env.get("TELEGRAM_CHAT_ID");
-const tgSecret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
+// Optional Telegram bot (commands, alerts, Yes/No for big Claude orders; settings on the dashboard). Needs all three values, else
+// orders go straight out. Vault (public.telegram_config()) wins over function secrets, so the bot can be set up and rotated with SQL.
+const vaultTg = await Promise.resolve(authClient.rpc("telegram_config"))
+  .then(({ data, error }) => (error ? null : (data as { token?: string; chat_id?: string; webhook_secret?: string } | null)))
+  .catch(() => null);
+const pick = (v: string | null | undefined, env: string) => (v ?? Deno.env.get(env) ?? "").trim() || undefined;
+const tgToken = pick(vaultTg?.token, "TELEGRAM_BOT_TOKEN");
+const tgChat = pick(vaultTg?.chat_id, "TELEGRAM_CHAT_ID");
+const tgSecret = pick(vaultTg?.webhook_secret, "TELEGRAM_WEBHOOK_SECRET");
 const approval =
   tgToken && tgChat && tgSecret
     ? {
-        telegram: new Telegram(tgToken, tgChat.trim()),
+        telegram: new Telegram(tgToken, tgChat),
         ttlMinutes: Number(Deno.env.get("APPROVAL_TTL_MINUTES") ?? "30"),
         webhookSecret: tgSecret,
       }
