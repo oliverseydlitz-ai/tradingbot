@@ -1,7 +1,9 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { Alpaca } from "./alpaca.ts";
+import { handleTelegramWebhook } from "./approval.ts";
 import { createApi } from "./api.ts";
 import type { GuardConfig } from "./guardrails.ts";
+import type { ApprovalGate } from "./order-service.ts";
 import type { Store } from "./store.ts";
 import { createServer } from "./tools.ts";
 
@@ -16,6 +18,8 @@ export interface AppDeps {
   resourceUrl: string;
   /** Supabase Auth issuer, e.g. https://<ref>.supabase.co/auth/v1 */
   authServerUrl: string;
+  /** Telegram Yes/No for big orders from Claude. Omit to place every order straight away. */
+  approval?: ApprovalGate & { webhookSecret: string };
   /** Validates a bearer token and returns the allowed identity, or null. Must enforce the single-user allowlist. */
   authenticate(token: string): Promise<{ login: string } | null>;
 }
@@ -72,6 +76,11 @@ export function createHandler(deps: AppDeps) {
       }
     }
 
+    // Telegram button taps. Authenticated by the webhook secret + your chat id, not a bearer token.
+    if (deps.approval && req.method === "POST" && pathname.endsWith("/telegram")) {
+      return handleTelegramWebhook(req, { alpaca: deps.alpaca, store: deps.store, getCfg, gate: deps.approval, webhookSecret: deps.approval.webhookSecret });
+    }
+
     if (req.method === "OPTIONS") return withCors(new Response(null, { status: 204 }));
 
     // RFC 9728 metadata. Served here because the function can only answer under /functions/v1/mcp/*;
@@ -102,7 +111,7 @@ export function createHandler(deps: AppDeps) {
     }
 
     // Stateless: a fresh server + transport per request.
-    const server = createServer({ alpaca: deps.alpaca, store: deps.store, getCfg });
+    const server = createServer({ alpaca: deps.alpaca, store: deps.store, getCfg, approval: deps.approval });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,

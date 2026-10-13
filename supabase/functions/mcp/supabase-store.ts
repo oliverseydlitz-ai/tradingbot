@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import type { GuardConfig } from "./guardrails.ts";
-import type { NoteInput, Store, TradeRow } from "./store.ts";
+import type { ApprovalInput, ApprovalRow, NoteInput, Store, TradeRow } from "./store.ts";
 
 const fail = (op: string, error: { message: string } | null) => {
   if (error) throw new Error(`db ${op}: ${error.message}`);
@@ -106,6 +106,55 @@ export function supabaseStore(url: string, serviceKey: string): Store {
       const { data, error } = await q;
       fail("list notes", error);
       return data ?? [];
+    },
+    async createApproval(a: ApprovalInput) {
+      const { data, error } = await db
+        .from("approvals")
+        .insert({
+          symbol: a.symbol,
+          side: a.side,
+          order_type: a.orderType,
+          qty: a.qty,
+          notional: a.notional,
+          limit_price: a.limitPrice,
+          reason: a.reason,
+          est_notional: a.estNotional,
+          equity_at_time: a.equity,
+          expires_at: a.expiresAt,
+        })
+        .select("id")
+        .single();
+      fail("create approval", error);
+      return data!.id as number;
+    },
+    async decideApproval(id, status) {
+      const { data, error } = await db
+        .from("approvals")
+        .update({ status, decided_at: new Date().toISOString() })
+        .eq("id", id)
+        .eq("status", "pending")
+        .gt("expires_at", new Date().toISOString())
+        .select("*")
+        .maybeSingle();
+      fail("decide approval", error);
+      if (!data) return null;
+      return {
+        id: data.id,
+        symbol: data.symbol,
+        side: data.side,
+        orderType: data.order_type,
+        qty: data.qty,
+        notional: data.notional,
+        limitPrice: data.limit_price,
+        reason: data.reason,
+        estNotional: data.est_notional,
+        equity: data.equity_at_time,
+        expiresAt: data.expires_at,
+      } satisfies ApprovalRow;
+    },
+    async finishApproval(id, patch) {
+      const { error } = await db.from("approvals").update({ ...(patch.status ? { status: patch.status } : {}), result: patch.result }).eq("id", id);
+      fail("finish approval", error);
     },
   };
 }

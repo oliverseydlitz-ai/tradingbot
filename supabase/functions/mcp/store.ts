@@ -23,6 +23,23 @@ export interface NoteInput {
   tags: string[];
 }
 
+export interface ApprovalInput {
+  symbol: string;
+  side: "buy" | "sell";
+  orderType: "market" | "limit";
+  qty: number | null;
+  notional: number | null;
+  limitPrice: number | null;
+  reason: string;
+  estNotional: number;
+  equity: number;
+  expiresAt: string;
+}
+
+export interface ApprovalRow extends ApprovalInput {
+  id: number;
+}
+
 /** Persistence port. The edge function uses the Postgres implementation in supabase-store.ts. */
 export interface Store {
   /** MCP (Claude) orders that consume the daily cap: pending, accepted or canceled (rejections and manual orders don't count). */
@@ -38,4 +55,9 @@ export interface Store {
   /** Claude's notes, kept so a later run can pick up where an earlier one left off. */
   saveNote(date: string, note: NoteInput): Promise<number>;
   listNotes(limit: number, tag?: string): Promise<unknown[]>;
+  /** Big orders held for a Telegram Yes/No. */
+  createApproval(a: ApprovalInput): Promise<number>;
+  /** Atomically moves a still-pending, unexpired approval to approved/declined. Null if it was already decided or expired. */
+  decideApproval(id: number, status: "approved" | "declined"): Promise<ApprovalRow | null>;
+  finishApproval(id: number, patch: { status?: "failed"; result: string }): Promise<void>;
 }

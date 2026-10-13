@@ -21,6 +21,21 @@ Remote MCP server that lets Claude trade an **Alpaca paper-trading account**, pl
 no margin (buys must fit in cash net of open buys), max order 10% of equity (buys), max position 20% of equity after the
 order, max 10 orders/day, optional `SYMBOL_ALLOWLIST`, mandatory `reason`. Every attempt, including rejections, is logged.
 
+## Telegram approval for big trades
+When Claude's `place_order` is at or above `APPROVAL_THRESHOLD_PCT` of equity (default 5), it is **not** sent. The server runs the guardrails, stores the request (table `approvals`), and Telegram messages you the trade and Claude's reason with **Yes / No** buttons. Claude is told it is pending and must not resubmit.
+- **Yes** re-runs the guardrails against live conditions (market open, cash, caps) and then places the order, logged as `source = mcp` with "approved via Telegram" in the reason. **No** or no answer within `APPROVAL_TTL_MINUTES` (default 30) places nothing.
+- A decision is claimed atomically, so double taps and Telegram retries can't place an order twice.
+- Fails closed: if the Telegram message can't be sent, nothing is placed. Manual dashboard orders and orders under the threshold are unaffected.
+- Optional: with no Telegram secrets set, every order goes straight out as before.
+
+Setup: talk to @BotFather → `/newbot` for the token; message your bot once, then read your chat id from `https://api.telegram.org/bot<TOKEN>/getUpdates`. Set the function secrets `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_WEBHOOK_SECRET` (any long random string; Telegram allows `A-Za-z0-9_-`), apply `migrations/20261013000000_approvals.sql`, redeploy, then register the webhook once:
+```sh
+curl "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+  -d url="https://kdbmfnybaqcgluxqhntp.supabase.co/functions/v1/mcp/telegram" \
+  -d secret_token="<TELEGRAM_WEBHOOK_SECRET>" -d allowed_updates='["callback_query"]'
+```
+Only taps from your chat id with the right secret header are acted on.
+
 ## Dashboard
 Sign in with GitHub (same allowlist). It shows equity vs SPY (indexed), allocation (stocks / ETFs / bond ETFs / cash), best and worst
 performers, positions, a manual trade ticket, open orders, the trade log, and editable limits. It talks to the same edge function under
@@ -40,7 +55,7 @@ performers, positions, a manual trade ticket, open orders, the trade log, and ed
 1. Supabase → Authentication → Providers → GitHub: enable with a GitHub OAuth app (callback `https://kdbmfnybaqcgluxqhntp.supabase.co/auth/v1/callback`).
 2. Supabase → Authentication → URL Configuration: Site URL `https://portfolio.oliverseydlitz.com`, add redirect URL `https://portfolio.oliverseydlitz.com/**`.
 3. Supabase → Authentication → OAuth Server: enable, authorization path `/oauth/consent`, enable dynamic client registration.
-4. Supabase → Edge Functions → Secrets: `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` (paper keys). Optional: `ALLOWED_GITHUB_LOGIN`, `MAX_ORDER_PCT`, `MAX_POSITION_PCT`, `MAX_ORDERS_PER_DAY`, `SYMBOL_ALLOWLIST`.
+4. Supabase → Edge Functions → Secrets: `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` (paper keys). Optional: `TELEGRAM_*` / `APPROVAL_*` (see above), `ALLOWED_GITHUB_LOGIN`, `MAX_ORDER_PCT`, `MAX_POSITION_PCT`, `MAX_ORDERS_PER_DAY`, `SYMBOL_ALLOWLIST`.
 5. GitHub → Settings → Pages: Source = **GitHub Actions** (the workflow deploys `site/`); custom domain `portfolio.oliverseydlitz.com`, Enforce HTTPS.
 6. Cloudflare DNS: CNAME `portfolio` → `oliverseydlitz-ai.github.io`, proxy status DNS only.
 7. claude.ai → Settings → Connectors → Add custom connector → the MCP URL above.
